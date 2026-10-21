@@ -130,7 +130,7 @@ jobs:
       # one, so re-runs of the same findings don't spam the tracker.
       - name: Open issue on new critical findings
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
