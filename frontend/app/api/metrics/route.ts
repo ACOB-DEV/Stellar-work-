@@ -68,11 +68,15 @@ function ingest(sample: Sample) {
       recordPageView(str(sample.path));
       return;
     case "contract_tx": {
-      const outcome = str(sample.outcome) === "error" ? "error" : "success";
+      const outcome = sample.outcome;
+      if (outcome !== "success" && outcome !== "error") return;
+      const method = str(sample.method).trim();
+      const network = str(sample.network).trim();
+      if (!method || !network) return;
       recordContractTx(
-        str(sample.method),
+        method,
         outcome,
-        str(sample.network),
+        network,
         num(sample.durationMs) ?? undefined,
       );
       return;
