@@ -54,7 +54,7 @@ docker compose up
 This starts:
 - **stellar** — Local Stellar testnet with Soroban RPC at [http://localhost:8000](http://localhost:8000)
 - **frontend** — Next.js dev server at [http://localhost:3000](http://localhost:3000) with hot-reload (files are live-synced)
-- **contract-builder** — Rust + Soroban CLI environment for building/testing contracts
+- **contract-builder** — Rust + Soroban CLI environment for building/testing contracts.
 
 **First run?** The Stellar testnet takes 20–30 seconds to initialize. Once ready, the frontend automatically connects to it via the Docker internal network.
 
