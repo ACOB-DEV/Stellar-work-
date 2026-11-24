@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   stroopsToXlm,
+  formatAmount,
   formatCompletedAt,
   shortAddress,
   escapeHtml,
@@ -50,6 +51,37 @@ describe("stroopsToXlm", () => {
   it("handles zero", () => {
     expect(stroopsToXlm("0")).toBe("0");
   });});
+
+// ─── formatAmount ──────────────────────────────────────────────────────────────
+
+describe("formatAmount", () => {
+  it("formats 7-decimal token correctly (same as XLM)", () => {
+    expect(formatAmount("10000000", 7)).toBe("1");
+    expect(formatAmount("50000000", 7)).toBe("5");
+    expect(formatAmount("15000000", 7)).toBe("1.5");
+  });
+
+  it("formats a 2-decimal token", () => {
+    expect(formatAmount("100", 2)).toBe("1");
+    expect(formatAmount("150", 2)).toBe("1.5");
+    expect(formatAmount("1", 2)).toBe("0.01");
+  });
+
+  it("strips trailing zeros", () => {
+    expect(formatAmount("10000000", 7)).toBe("1");
+    expect(formatAmount("10500000", 7)).toBe("1.05");
+  });
+
+  it("returns – for invalid input", () => {
+    expect(formatAmount("", 7)).toBe("–");
+    expect(formatAmount("invalid", 7)).toBe("–");
+    expect(formatAmount("-1", 7)).toBe("–");
+  });
+
+  it("handles zero", () => {
+    expect(formatAmount("0", 7)).toBe("0");
+  });
+});
 
 // ─── formatCompletedAt ────────────────────────────────────────────────────────
 
@@ -137,10 +169,35 @@ describe("buildCertificateHtml", () => {
     expect(html).toContain("#42");
   });
 
-  it("includes the XLM amount", () => {
+  it("includes the XLM amount for a native-token certificate", () => {
     const html = buildCertificateHtml(SAMPLE_DATA, "data:image/png;base64,FAKE");
-    // 50_000_000 stroops = 5 XLM, displayed as "5 XLM" (trailing zeros stripped)
+    // 50_000_000 base units ÷ 10^7 = 5, displayed as "5 XLM" (trailing zeros stripped)
     expect(html).toContain("5 XLM");
+  });
+
+  it("uses the token field instead of hardcoded XLM", () => {
+    const usdcData: CertificateData = {
+      ...SAMPLE_DATA,
+      // USDC on Stellar has 7 decimal places too
+      amount: "50000000",
+      token: "USDC",
+      decimals: 7,
+    };
+    const html = buildCertificateHtml(usdcData, "data:image/gif;base64,X");
+    expect(html).toContain("5 USDC");
+    expect(html).not.toContain("5 XLM");
+  });
+
+  it("formats non-XLM token with correct decimal precision", () => {
+    // A hypothetical 2-decimal token: 100 base units = 1.00 token
+    const tokenData: CertificateData = {
+      ...SAMPLE_DATA,
+      amount: "100",
+      token: "MYTOKEN",
+      decimals: 2,
+    };
+    const html = buildCertificateHtml(tokenData, "data:image/gif;base64,X");
+    expect(html).toContain("1 MYTOKEN");
   });
 
   it("embeds the QR data URL in an img tag", () => {
@@ -229,6 +286,24 @@ describe("buildCertificateData", () => {
     const data = buildCertificateData(cert);
     expect(data.amount).toBe("20000000");
     expect(data.completedAt).toBe("99999");
+  });
+
+  it("passes token and decimals through opts", () => {
+    const data = buildCertificateData(cert, {
+      token: "USDC",
+      decimals: 7,
+    });
+    expect(data.token).toBe("USDC");
+    expect(data.decimals).toBe(7);
+  });
+
+  it("omits token and decimals when not provided (defaults to XLM)", () => {
+    const data = buildCertificateData(cert);
+    expect(data.token).toBeUndefined();
+    expect(data.decimals).toBeUndefined();
+    // HTML should still display XLM as the default label
+    const html = buildCertificateHtml(data, "data:image/gif;base64,X");
+    expect(html).toContain("XLM");
   });
 });
 
