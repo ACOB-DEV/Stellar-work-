@@ -11,7 +11,8 @@ export interface Dispute {
   jobTitle: string;
   client: string;
   freelancer: string;
-  amount: number;
+  /** Raw contract base units kept as bigint to avoid Number.MAX_SAFE_INTEGER truncation. */
+  amount: bigint;
   raisedBy: "client" | "freelancer";
   raisedAt: string;
   status: DisputeStatus;
@@ -29,7 +30,15 @@ export interface EligibleJob {
   id: string;
   title: string;
   counterparty: string;
-  amount: number;
+  /** Raw contract base units kept as bigint to avoid Number.MAX_SAFE_INTEGER truncation. */
+  amount: bigint;
+}
+
+/** Integer basis-point split: returns clientAmount and freelancerAmount summing to total. */
+export function splitByBps(total: bigint, clientBps: number): { clientAmount: bigint; freelancerAmount: bigint } {
+  const clientAmount = (total * BigInt(clientBps)) / BigInt(100);
+  const freelancerAmount = total - clientAmount;
+  return { clientAmount, freelancerAmount };
 }
 
 export type DisputesPageData = {
@@ -58,7 +67,7 @@ export async function loadDisputesPageData(wallet: string): Promise<DisputesPage
         jobTitle: `Job #${id}`,
         client: job.client,
         freelancer: job.freelancer ?? "unknown",
-        amount: Number(job.amount),
+        amount: BigInt(job.amount),
         raisedBy: job.client === wallet ? "client" : "freelancer",
         raisedAt: now,
         status: "Active",
@@ -71,7 +80,7 @@ export async function loadDisputesPageData(wallet: string): Promise<DisputesPage
         id: String(id),
         title: `Job #${id}`,
         counterparty: job.client === wallet ? (job.freelancer ?? "unknown") : job.client,
-        amount: Number(job.amount),
+        amount: BigInt(job.amount),
       });
     }
   }

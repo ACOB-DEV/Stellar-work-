@@ -13,6 +13,7 @@ import { isConfirmSuppressed, CONFIRM_KEYS } from "@/lib/confirm-prefs";
 import { raiseDispute as contractRaiseDispute, resolveDispute as contractResolveDispute } from "@/lib/contract";
 import {
   loadDisputesPageData,
+  splitByBps,
   type Dispute,
   type DisputeStatus,
   type EligibleJob,
@@ -34,7 +35,7 @@ function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
-function fmtAmount(n: number): string {
+function fmtAmount(n: number | bigint): string {
   return `${toXlm(n)} XLM`;
 }
 
@@ -316,12 +317,12 @@ function ResolveModal({
             <div className="mt-2 grid grid-cols-2 gap-2">
               <div className="rounded-lg bg-blue-50 px-3 py-2 ring-1 ring-blue-100">
                 <p className="text-[10px] text-blue-500 font-medium uppercase tracking-wide">Client</p>
-                <p className="text-sm font-semibold text-blue-700 mt-0.5">{fmtAmount(Math.floor(dispute.amount * clientShare / 100))}</p>
+                <p className="text-sm font-semibold text-blue-700 mt-0.5">{fmtAmount(splitByBps(dispute.amount, clientShare).clientAmount)}</p>
                 <p className="text-[10px] text-blue-400">{dispute.client}</p>
               </div>
               <div className="rounded-lg bg-violet-50 px-3 py-2 ring-1 ring-violet-100">
                 <p className="text-[10px] text-violet-500 font-medium uppercase tracking-wide">Freelancer</p>
-                <p className="text-sm font-semibold text-violet-700 mt-0.5">{fmtAmount(Math.floor(dispute.amount * freelancerShare / 100))}</p>
+                <p className="text-sm font-semibold text-violet-700 mt-0.5">{fmtAmount(splitByBps(dispute.amount, clientShare).freelancerAmount)}</p>
                 <p className="text-[10px] text-violet-400">{dispute.freelancer}</p>
               </div>
             </div>
@@ -426,13 +427,13 @@ function DisputeCard({
               <div className="flex gap-3">
                 <div>
                   <p className="text-[10px] text-emerald-500">Client received</p>
-                  <p className="text-sm font-bold text-emerald-700">{fmtAmount(Math.floor(dispute.amount * dispute.resolution.clientShare / 100))}</p>
+                  <p className="text-sm font-bold text-emerald-700">{fmtAmount(splitByBps(dispute.amount, dispute.resolution.clientShare).clientAmount)}</p>
                   <p className="text-[10px] text-emerald-400">{dispute.resolution.clientShare}%</p>
                 </div>
                 <div className="w-px bg-emerald-200" />
                 <div>
                   <p className="text-[10px] text-emerald-500">Freelancer received</p>
-                  <p className="text-sm font-bold text-emerald-700">{fmtAmount(Math.floor(dispute.amount * dispute.resolution.freelancerShare / 100))}</p>
+                  <p className="text-sm font-bold text-emerald-700">{fmtAmount(splitByBps(dispute.amount, dispute.resolution.clientShare).freelancerAmount)}</p>
                   <p className="text-[10px] text-emerald-400">{dispute.resolution.freelancerShare}%</p>
                 </div>
               </div>
