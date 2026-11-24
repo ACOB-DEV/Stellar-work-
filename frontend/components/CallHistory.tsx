@@ -18,15 +18,24 @@ function formatTime(ts: number): string {
 
 
 
-export default function CallHistory({ peerAddress }: CallHistoryProps) {
+interface CallHistoryProps {
+  peerAddress: string;
+  /** #1331: the connected wallet address; history is scoped to this owner. */
+  ownerAddress: string;
+}
+
+export default function CallHistory({ peerAddress, ownerAddress }: CallHistoryProps) {
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
-    const all = loadCallHistory();
+    if (!ownerAddress) return;
+    // #1331: load history scoped to the connected wallet so records from a
+    // previously connected account are never visible here.
+    const all = loadCallHistory(ownerAddress);
     const filtered = all.filter((c) => c.peerAddress === peerAddress);
     setCalls(filtered);
-  }, [peerAddress]);
+  }, [peerAddress, ownerAddress]);
 
   if (calls.length === 0) return null;
 

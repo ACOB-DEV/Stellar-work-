@@ -22,6 +22,9 @@ export default function CallOverlay({
 }: CallOverlayProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const callIdRef = useRef<string>("");
+  // connectedAtRef tracks when the authenticated join event fired, not when the
+  // iframe document loaded. Duration is measured from join to end (#1330).
+  const connectedAtRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
 
   useModalFocusTrap(true, dialogRef, onClose);
@@ -32,27 +35,60 @@ export default function CallOverlay({
 
     saveCallRecord({
       id: callIdRef.current,
+      ownerAddress: myAddress.toLowerCase(),
       peerAddress,
       type: callType,
       startedAt: startTimeRef.current,
       status: "ringing",
     });
 
+    // #1330: listen for Daily.co postMessage events instead of iframe onLoad.
+    // The `joined-meeting` event fires when the local participant successfully
+    // joins the room (not on error pages or waiting screens). `left-meeting`
+    // fires when they leave via UI; `error` fires on join failure.
+    function handleMessage(ev: MessageEvent) {
+      // Daily.co Prebuilt posts events as plain objects with an `action` key.
+      if (!ev.data || typeof ev.data !== "object") return;
+      const { action } = ev.data as { action?: string };
+      if (action === "joined-meeting") {
+        connectedAtRef.current = Date.now();
+        updateCallRecord(callIdRef.current, myAddress.toLowerCase(), { status: "connected" });
+      } else if (action === "left-meeting") {
+        const connectedSince = connectedAtRef.current;
+        const duration = connectedSince > 0 ? Date.now() - connectedSince : 0;
+        updateCallRecord(callIdRef.current, myAddress.toLowerCase(), {
+          status: "ended",
+          endedAt: Date.now(),
+          duration: duration > 0 ? duration : undefined,
+        });
+        onClose();
+      } else if (action === "error") {
+        updateCallRecord(callIdRef.current, myAddress.toLowerCase(), { status: "missed" });
+      }
+    }
+
+    window.addEventListener("message", handleMessage);
+
     return () => {
-      const duration = Date.now() - startTimeRef.current;
-      updateCallRecord(callIdRef.current, {
-        status: "ended",
-        endedAt: Date.now(),
+      window.removeEventListener("message", handleMessage);
+      // If the overlay is closed without a left-meeting event (e.g. browser
+      // back), mark as ended with ringing-time duration only when never joined.
+      const connectedSince = connectedAtRef.current;
+      const endedAt = Date.now();
+      const duration = connectedSince > 0 ? endedAt - connectedSince : undefined;
+      updateCallRecord(callIdRef.current, myAddress.toLowerCase(), {
+        status: connectedSince > 0 ? "ended" : "missed",
+        endedAt,
         duration,
       });
     };
-  }, [peerAddress, callType]);
+  }, [myAddress, peerAddress, callType, onClose]);
 
   const dailyUrl = getDailyUrl(myAddress, peerAddress, callType, userName);
 
-  const handleIframeLoad = useCallback(() => {
-    updateCallRecord(callIdRef.current, { status: "connected" });
-  }, []);
+  // handleIframeLoad is intentionally left as a no-op; the connected state is
+  // now driven by the joined-meeting postMessage event (#1330).
+  const handleIframeLoad = useCallback(() => {}, []);
 
   return (
     <div

@@ -210,11 +210,17 @@ export function applyFilters(
       return false;
     }
     if (filters.dateFrom) {
-      const from = new Date(filters.dateFrom).setHours(0, 0, 0, 0);
+      // #1329: parse YYYY-MM-DD into local midnight by splitting the components
+      // rather than passing the string to `new Date`, which treats date-only
+      // strings as UTC midnight and therefore falls on the previous local day in
+      // negative UTC offsets (e.g. America/Los_Angeles at UTC−8).
+      const [fy, fm, fd] = filters.dateFrom.split("-").map(Number);
+      const from = new Date(fy, fm - 1, fd, 0, 0, 0, 0).getTime();
       if (tx.timestamp < from) return false;
     }
     if (filters.dateTo) {
-      const to = new Date(filters.dateTo).setHours(23, 59, 59, 999);
+      const [ty, tm, td] = filters.dateTo.split("-").map(Number);
+      const to = new Date(ty, tm - 1, td, 23, 59, 59, 999).getTime();
       if (tx.timestamp > to) return false;
     }
     return true;
