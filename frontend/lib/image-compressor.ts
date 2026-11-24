@@ -95,9 +95,20 @@ export async function compressAndValidateImage(
       throw new Error("Failed to export compressed canvas blob");
     }
 
-    // Preserve original filename and mime type
-    const compressedFile = new File([blob], file.name, {
-      type: file.type || "image/jpeg",
+    // Use blob.type (the actual encoded format) rather than file.type: when the
+    // requested type is not a supported canvas export format (e.g. GIF, SVG),
+    // the browser silently falls back to PNG, so blob.type reflects reality
+    // while file.type would mislabel PNG bytes as the original format (#1294).
+    const actualType = blob.type || "image/jpeg";
+    // Update the file extension when the browser had to transcode to a different
+    // format, so the filename does not lie about the container format either.
+    let outputName = file.name;
+    if (actualType !== file.type) {
+      const ext = actualType.split("/")[1]?.replace("jpeg", "jpg") ?? "jpg";
+      outputName = file.name.replace(/\.[^.]+$/, `.${ext}`);
+    }
+    const compressedFile = new File([blob], outputName, {
+      type: actualType,
       lastModified: Date.now(),
     });
 
