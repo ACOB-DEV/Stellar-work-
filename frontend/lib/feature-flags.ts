@@ -58,9 +58,15 @@ export function loadOverrides(): FlagState {
   if (typeof window === "undefined") return {};
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
+    if (!raw) {
+      overrides = {};
+      return {};
+    }
     const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      overrides = {};
+      return {};
+    }
     const result: FlagState = {};
     for (const [key, value] of Object.entries(parsed)) {
       if (typeof value === "boolean" && key in FLAG_DEFINITIONS) {
@@ -70,6 +76,7 @@ export function loadOverrides(): FlagState {
     overrides = result;
     return result;
   } catch {
+    overrides = {};
     return {};
   }
 }

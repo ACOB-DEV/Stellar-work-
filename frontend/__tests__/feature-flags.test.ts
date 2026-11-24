@@ -180,4 +180,81 @@ describe("Feature Flags", () => {
     const urlOv = getUrlOverrides();
     expect(urlOv.multiToken).toBe(true);
   });
+
+  // BUG-61: loadOverrides must reset in-memory overrides on every failed load
+  // path, not just on a successful read. Previously, all early-return paths
+  // returned {} without touching the module-level `overrides` object, so a
+  // previously-loaded true value remained effective after the storage key was
+  // removed or corrupted.
+  describe("BUG-61: loadOverrides resets stale in-memory flags on failed load", () => {
+    it("resets overrides when storage key is deleted", () => {
+      // Establish a true override in-memory and in storage.
+      setFlagOverride("newDashboard", true);
+      expect(isEnabled("newDashboard")).toBe(true);
+
+      // Remove the storage key and reload — must clear the in-memory map.
+      localStorage.removeItem("stellarwork:feature-flags");
+      loadOverrides();
+      expect(isEnabled("newDashboard")).toBe(false);
+    });
+
+    it("resets overrides when stored JSON is invalid", () => {
+      setFlagOverride("newMessaging", true);
+      expect(isEnabled("newMessaging")).toBe(true);
+
+      localStorage.setItem("stellarwork:feature-flags", "not-valid-json");
+      loadOverrides();
+      expect(isEnabled("newMessaging")).toBe(false);
+    });
+
+    it("resets overrides when stored value is a JSON primitive (not an object)", () => {
+      setFlagOverride("milestones", true);
+      expect(isEnabled("milestones")).toBe(true);
+
+      localStorage.setItem("stellarwork:feature-flags", JSON.stringify(42));
+      loadOverrides();
+      expect(isEnabled("milestones")).toBe(false);
+    });
+
+    it("resets overrides when a read exception is thrown", () => {
+      // Set a true override in-memory via saveOverrides directly (bypassing
+      // localStorage so the spy below doesn't interfere with the setup call).
+      saveOverrides({ biddingSystem: true });
+      // Confirm the in-memory flag is live.
+      expect(getFlagOverrides().biddingSystem).toBe(true);
+
+      // Corrupt the stored value so parsing throws — invalid JSON causes the
+      // catch branch (which now resets overrides) to fire.
+      localStorage.setItem("stellarwork:feature-flags", "{bad json}");
+      loadOverrides();
+      expect(isEnabled("biddingSystem")).toBe(false);
+    });
+
+    it("does not retain flags that were not in the reload result", () => {
+      // A flag with no prior override should not appear after a failed load.
+      setFlagOverride("newDashboard", true);
+      setFlagOverride("newMessaging", true);
+
+      // Remove storage — both flags must be cleared.
+      localStorage.removeItem("stellarwork:feature-flags");
+      loadOverrides();
+      expect(isEnabled("newDashboard")).toBe(false);
+      expect(isEnabled("newMessaging")).toBe(false);
+    });
+
+    it("retains a valid flag that is present in storage after a reload", () => {
+      setFlagOverride("newDashboard", true);
+      setFlagOverride("newMessaging", true);
+
+      // Overwrite storage to only contain newDashboard.
+      localStorage.setItem(
+        "stellarwork:feature-flags",
+        JSON.stringify({ newDashboard: true })
+      );
+      loadOverrides();
+      expect(isEnabled("newDashboard")).toBe(true);
+      // newMessaging was not in storage — must be cleared.
+      expect(isEnabled("newMessaging")).toBe(false);
+    });
+  });
 });
