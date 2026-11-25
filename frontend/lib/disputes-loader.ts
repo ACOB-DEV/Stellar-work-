@@ -43,7 +43,6 @@ export async function loadDisputesPageData(wallet: string): Promise<DisputesPage
 
   const disputes: Dispute[] = [];
   const eligibleJobs: EligibleJob[] = [];
-  const now = new Date().toISOString();
 
   for (let id = 1; id <= count; id++) {
     const job = await getJob(String(id));
@@ -52,6 +51,28 @@ export async function loadDisputesPageData(wallet: string): Promise<DisputesPage
     if (job.client !== wallet && job.freelancer !== wallet) continue;
 
     if (job.status === "Disputed") {
+      // #1332: `raisedBy` must reflect who actually raised the dispute, not
+      // which role the current viewer holds. The contract stores the disputing
+      // party in `job.disputed_by` (the caller of `job_disputed`); fall back to
+      // "unknown" when the field is absent rather than guessing from the viewer.
+      // `raisedAt` is derived from the event timestamp stored on the job
+      // (`job.disputed_at`, unix seconds) so it is stable across reloads and
+      // the same for both participants.
+      const disputedBy: string | undefined = (job as Record<string, unknown>).disputed_by as string | undefined;
+      let raisedBy: "client" | "freelancer" | "unknown";
+      if (disputedBy === job.client) {
+        raisedBy = "client";
+      } else if (disputedBy === job.freelancer) {
+        raisedBy = "freelancer";
+      } else {
+        raisedBy = "unknown";
+      }
+
+      const disputedAtSec: number | undefined = (job as Record<string, unknown>).disputed_at as number | undefined;
+      const raisedAt = disputedAtSec
+        ? new Date(Number(disputedAtSec) * 1000).toISOString()
+        : new Date(Number(job.created_at) * 1000).toISOString();
+
       disputes.push({
         id: `D-${String(id).padStart(3, "0")}`,
         jobId: String(id),
@@ -59,8 +80,8 @@ export async function loadDisputesPageData(wallet: string): Promise<DisputesPage
         client: job.client,
         freelancer: job.freelancer ?? "unknown",
         amount: Number(job.amount),
-        raisedBy: job.client === wallet ? "client" : "freelancer",
-        raisedAt: now,
+        raisedBy: raisedBy as "client" | "freelancer",
+        raisedAt,
         status: "Active",
         reason: "Dispute raised on-chain. See job details for more information.",
       });
