@@ -15,6 +15,7 @@ StellarWork is an open-source decentralized freelance marketplace on Stellar. Pa
 ```
 stellarwork
 ├── contracts/escrow
+├── contracts/retainer
 ├── frontend
 └── docs
 ```
@@ -53,7 +54,7 @@ docker compose up
 This starts:
 - **stellar** — Local Stellar testnet with Soroban RPC at [http://localhost:8000](http://localhost:8000)
 - **frontend** — Next.js dev server at [http://localhost:3000](http://localhost:3000) with hot-reload (files are live-synced)
-- **contract-builder** — Rust + Soroban CLI environment for building/testing contracts
+- **contract-builder** — Rust + Soroban CLI environment for building/testing contracts.
 
 **First run?** The Stellar testnet takes 20–30 seconds to initialize. Once ready, the frontend automatically connects to it via the Docker internal network.
 
@@ -283,6 +284,7 @@ For hosting the frontend on Vercel, Netlify, or Docker (plus production env conf
 For a command-only deployment reference, see `docs/testnet-deployment-guide.md`.
 For environment configuration, see `docs/environments.md`.
 For API reference, see `docs/CONTRACT.md`.
+For retainer contract reference, see `docs/retainer-reference.md`.
 For frontend architecture, see `docs/FRONTEND_ARCHITECTURE.md`.
 For third-party integration, see `docs/INTEGRATION.md`.
 

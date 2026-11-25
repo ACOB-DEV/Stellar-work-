@@ -68,11 +68,15 @@ function ingest(sample: Sample) {
       recordPageView(str(sample.path));
       return;
     case "contract_tx": {
-      const outcome = str(sample.outcome) === "error" ? "error" : "success";
+      const outcome = sample.outcome;
+      if (outcome !== "success" && outcome !== "error") return;
+      const method = str(sample.method).trim();
+      const network = str(sample.network).trim();
+      if (!method || !network) return;
       recordContractTx(
-        str(sample.method),
+        method,
         outcome,
-        str(sample.network),
+        network,
         num(sample.durationMs) ?? undefined,
       );
       return;
@@ -86,9 +90,14 @@ function ingest(sample: Sample) {
     case "job_view":
       recordJobView(str(sample.jobId));
       return;
-    case "session_ping":
-      recordActiveSession();
+    case "session_ping": {
+      const sessionId =
+        typeof sample.sessionId === "string" && sample.sessionId.trim()
+          ? sample.sessionId.trim()
+          : undefined;
+      recordActiveSession(sessionId);
       return;
+    }
     case "font_timing": {
       const durationMs = num(sample.durationMs);
       if (durationMs === null) return;
@@ -108,8 +117,9 @@ function ingest(sample: Sample) {
 /** Prometheus scrape target. */
 export async function GET(request: Request) {
   if (!isEnabled()) {
-    return new Response("metrics disabled\n", { status: 404 });
+    return new Response(null, { status: 404 });
   }
+
   if (!isAuthorized(request)) {
     return new Response("unauthorized\n", { status: 401 });
   }
@@ -118,7 +128,7 @@ export async function GET(request: Request) {
     status: 200,
     headers: {
       "content-type": PROMETHEUS_CONTENT_TYPE,
-      "cache-control": "no-store",
+      "cache-control": "no-store, no-cache, must-revalidate",
     },
   });
 }
@@ -134,12 +144,41 @@ export async function POST(request: Request) {
     return new Response(null, { status: 413 });
   }
 
+  if (!request.body) {
+    return new Response(null, { status: 400 });
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        totalBytes += value.byteLength;
+        if (totalBytes > MAX_BODY_BYTES) {
+          await reader.cancel("Body exceeds maximum allowed size");
+          return new Response(null, { status: 413 });
+        }
+        chunks.push(value);
+      }
+    }
+  } catch {
+    return new Response(null, { status: 400 });
+  }
+
+  const concatenated = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    concatenated.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
   let body: unknown;
   try {
-    const raw = await request.text();
-    if (raw.length > MAX_BODY_BYTES) {
-      return new Response(null, { status: 413 });
-    }
+    const raw = new TextDecoder().decode(concatenated);
     body = JSON.parse(raw);
   } catch {
     return new Response(null, { status: 400 });

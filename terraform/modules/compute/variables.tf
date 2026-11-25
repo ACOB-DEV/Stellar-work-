@@ -75,3 +75,30 @@ variable "ssl_policy" {
   description = "SSL Policy for HTTPS listener"
   default     = "ELBSecurityPolicy-TLS13-1-2-2021-06"
 }
+  description = "Fargate instance memory (MiB)"
+  default     = "512"
+}
+
+variable "app_count" {
+  type        = number
+  description = "Number of ECS tasks to run"
+  default     = 2
+}
+
+variable "enable_deployment_circuit_breaker" {
+  type        = bool
+  description = "Enable deployment circuit breaker for ECS service"
+  default     = true
+}
+
+variable "enable_deployment_rollback" {
+  type        = bool
+  description = "Enable automatic rollback on deployment failure"
+  default     = true
+}
+
+variable "health_check_grace_period_seconds" {
+  type        = number
+  description = "Seconds to ignore failing load balancer health checks on newly instantiated tasks"
+  default     = 60
+}
