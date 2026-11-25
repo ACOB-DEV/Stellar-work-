@@ -24,6 +24,17 @@ export interface CertificateData {
   /** Amount in stroops (string) */
   amount: string;
   /**
+   * Token code or address for the payment asset.
+   * "XLM" for the native asset; a Stellar address for custom tokens.
+   * Defaults to "XLM" when omitted.
+   */
+  token?: string;
+  /**
+   * Number of decimal places for the token (e.g. 7 for XLM/USDC on Stellar).
+   * Defaults to 7 when omitted so existing XLM certificates are unaffected.
+   */
+  decimals?: number;
+  /**
    * Completion timestamp — on-chain this is a ledger sequence number.
    * When it looks like a Unix timestamp (> 1e9) it is formatted as a date;
    * otherwise it is displayed as "Ledger <n>".
@@ -45,6 +56,23 @@ export function stroopsToXlm(stroops: string): string {
   const xlm = n / STROOPS_PER_XLM;
   // Trim all trailing zeros and the decimal point when not needed
   const formatted = xlm.toFixed(7).replace(/\.?0+$/, "");
+  return formatted === "" ? "0" : formatted;
+}
+
+/**
+ * Format a base-unit amount string with arbitrary decimal precision.
+ *
+ * @param amount  Amount in the token's smallest unit (e.g. stroops for XLM).
+ * @param decimals  Number of decimal places defined by the token (default 7).
+ * @returns Human-readable string with trailing zeros stripped, or "–" on error.
+ */
+export function formatAmount(amount: string, decimals = 7): string {
+  if (!amount || amount.trim() === "") return "–";
+  const n = Number(amount);
+  if (!Number.isFinite(n) || n < 0) return "–";
+  const divisor = Math.pow(10, decimals);
+  const value = n / divisor;
+  const formatted = value.toFixed(decimals).replace(/\.?0+$/, "");
   return formatted === "" ? "0" : formatted;
 }
 
@@ -197,7 +225,8 @@ export function buildCertificateHtml(
   data: CertificateData,
   qrDataUrl: string,
 ): string {
-  const amountXlm = stroopsToXlm(data.amount);
+  const tokenLabel = data.token || "XLM";
+  const amountXlm = formatAmount(data.amount, data.decimals ?? 7);
   const completionDate = formatCompletedAt(data.completedAt);
 
   return `<!DOCTYPE html>
@@ -358,7 +387,7 @@ export function buildCertificateHtml(
       </div>
       <div class="meta-item">
         <div class="meta-label">Amount</div>
-        <div class="meta-value">${escapeHtml(amountXlm)} XLM</div>
+        <div class="meta-value">${escapeHtml(amountXlm)} ${escapeHtml(tokenLabel)}</div>
       </div>
       <div class="meta-item">
         <div class="meta-label">On-chain Identifier</div>
@@ -438,6 +467,10 @@ export function buildCertificateData(
   opts: {
     jobTitle?: string;
     origin?: string;
+    /** Token code or address; defaults to "XLM". */
+    token?: string;
+    /** Token decimal places; defaults to 7. */
+    decimals?: number;
   } = {},
 ): CertificateData {
   const origin =
@@ -451,6 +484,8 @@ export function buildCertificateData(
     client: cert.client,
     freelancer: cert.freelancer,
     amount: cert.amount,
+    ...(opts.token !== undefined && { token: opts.token }),
+    ...(opts.decimals !== undefined && { decimals: opts.decimals }),
     completedAt: cert.completed_at,
     verificationUrl,
   };

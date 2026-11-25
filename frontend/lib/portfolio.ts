@@ -71,11 +71,29 @@ export function loadPortfolio(address: string): Portfolio {
     const parsed = JSON.parse(raw) as Partial<Portfolio>;
     return {
       version: 1,
-      bio: typeof parsed.bio === "string" ? parsed.bio : "",
-      skills: Array.isArray(parsed.skills) ? (parsed.skills as string[]) : [],
-      links: Array.isArray(parsed.links) ? (parsed.links as ExternalLink[]) : [],
+      bio: typeof parsed.bio === "string"
+        ? parsed.bio.slice(0, MAX_BIO_LENGTH)
+        : "",
+      skills: Array.isArray(parsed.skills)
+        ? parsed.skills
+            .filter((s): s is string => typeof s === "string")
+            .slice(0, MAX_SKILLS)
+        : [],
+      links: Array.isArray(parsed.links)
+        ? parsed.links
+            .filter(
+              (l): l is ExternalLink =>
+                l !== null &&
+                typeof l === "object" &&
+                typeof l.label === "string" &&
+                typeof l.url === "string",
+            )
+            .slice(0, MAX_LINKS)
+        : [],
       highlightedJobIds: Array.isArray(parsed.highlightedJobIds)
-        ? (parsed.highlightedJobIds as number[])
+        ? parsed.highlightedJobIds
+            .filter((id): id is number => typeof id === "number" && Number.isInteger(id))
+            .slice(0, MAX_HIGHLIGHTS)
         : [],
     };
   } catch {
@@ -98,7 +116,17 @@ export function loadTestimonials(address: string): Testimonial[] {
     const raw = localStorage.getItem(testimonialsKey(address));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as Testimonial[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (t): t is Testimonial =>
+        t !== null &&
+        typeof t === "object" &&
+        typeof t.jobId === "number" &&
+        Number.isInteger(t.jobId) &&
+        typeof t.clientAddress === "string" &&
+        typeof t.text === "string" &&
+        typeof t.createdAt === "number",
+    ).map((t) => ({ ...t, text: t.text.slice(0, MAX_TESTIMONIAL_LENGTH) }));
   } catch {
     return [];
   }
