@@ -20,9 +20,13 @@ const MAX_METRIC_VALUE = 1e9;
 /** Session inactivity window for concurrent visitor estimation (1 minute). */
 export const SESSION_INACTIVITY_TTL_MS = 60_000;
 
-const WEB_VITAL_BUCKETS_MS = [50, 100, 200, 400, 800, 1600, 2500, 4000, 6000, 10000];
+const WEB_VITAL_BUCKETS_MS = [
+  50, 100, 200, 400, 800, 1600, 2500, 4000, 6000, 10000,
+];
 const CLS_BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1];
-const TX_DURATION_BUCKETS_MS = [250, 500, 1000, 2500, 5000, 10000, 20000, 40000];
+const TX_DURATION_BUCKETS_MS = [
+  250, 500, 1000, 2500, 5000, 10000, 20000, 40000,
+];
 
 type Labels = Record<string, string>;
 
@@ -42,7 +46,10 @@ type HistogramMetric = {
   kind: "histogram";
   help: string;
   buckets: number[];
-  series: Map<string, { labels: Labels; counts: number[]; sum: number; count: number }>;
+  series: Map<
+    string,
+    { labels: Labels; counts: number[]; sum: number; count: number }
+  >;
 };
 
 type Metric = CounterMetric | HistogramMetric | GaugeMetric;
@@ -70,10 +77,19 @@ function setGauge(metric: GaugeMetric, labels: Labels, value: number) {
   metric.series.set(key, { labels, value });
 }
 
-function histogram(name: string, help: string, buckets: number[]): HistogramMetric {
+function histogram(
+  name: string,
+  help: string,
+  buckets: number[],
+): HistogramMetric {
   const existing = registry.get(name);
   if (existing) return existing as HistogramMetric;
-  const metric: HistogramMetric = { kind: "histogram", help, buckets, series: new Map() };
+  const metric: HistogramMetric = {
+    kind: "histogram",
+    help,
+    buckets,
+    series: new Map(),
+  };
   registry.set(name, metric);
   return metric;
 }
@@ -109,7 +125,12 @@ function observe(metric: HistogramMetric, labels: Labels, value: number) {
   let entry = metric.series.get(key);
   if (!entry) {
     if (metric.series.size >= MAX_SERIES_PER_METRIC) return;
-    entry = { labels, counts: new Array(metric.buckets.length).fill(0), sum: 0, count: 0 };
+    entry = {
+      labels,
+      counts: new Array(metric.buckets.length).fill(0),
+      sum: 0,
+      count: 0,
+    };
     metric.series.set(key, entry);
   }
   if (!Number.isFinite(entry.sum + value)) {
@@ -136,7 +157,10 @@ const layoutShift = histogram(
   CLS_BUCKETS,
 );
 
-const pageViews = counter("stellarwork_page_views_total", "Page views reported by browsers.");
+const pageViews = counter(
+  "stellarwork_page_views_total",
+  "Page views reported by browsers.",
+);
 
 const contractTx = counter(
   "stellarwork_contract_tx_total",
@@ -157,6 +181,11 @@ const rpcErrors = counter(
 const clientErrors = counter(
   "stellarwork_client_errors_total",
   "Unhandled frontend errors reported by browsers.",
+);
+
+const cspViolations = counter(
+  "stellarwork_csp_violations_total",
+  "Content Security Policy violations reported by browsers.",
 );
 
 const httpRequests = counter(
@@ -230,7 +259,7 @@ export function sanitizeLabel(value: unknown, fallback = "unknown"): string {
 export function normalizePath(path: unknown, fallback = "/"): string {
   if (typeof path !== "string" || !path.trim()) return fallback;
   let p = path.split("?")[0].split("#")[0].trim();
-  if (!p.startsWith("/")) p = `/${p}`;
+  if (!p.startsWith("/")) p = /;
 
   // Canonicalize dynamic segments
   p = p.replace(/\/job\/[^/]+/g, "/job/[id]");
@@ -239,8 +268,13 @@ export function normalizePath(path: unknown, fallback = "/"): string {
   return sanitizeLabel(p, fallback);
 }
 
-export function recordWebVital(metric: WebVitalName, valueMs: number, path: string) {
+export function recordWebVital(
+  metric: WebVitalName,
+  valueMs: number,
+  path: string,
+) {
   observe(webVital, { metric, path: normalizePath(path) }, valueMs);
+}
 }
 
 export function recordLayoutShift(score: number, path: string) {
@@ -268,14 +302,33 @@ export function recordContractTx(
 }
 
 export function recordRpcError(kind: string, network: string) {
-  incCounter(rpcErrors, { kind: sanitizeLabel(kind), network: sanitizeLabel(network) });
+  incCounter(rpcErrors, {
+    kind: sanitizeLabel(kind),
+    network: sanitizeLabel(network),
+  });
 }
 
 export function recordClientError(kind: string, path: string) {
   incCounter(clientErrors, { kind: sanitizeLabel(kind), path: normalizePath(path) });
 }
 
-export function recordHttpRequest(route: string, statusCode: number, durationMs: number) {
+export function recordCspViolation(
+  directive: string,
+  blockedUri: string,
+  documentUri?: string,
+) {
+  incCounter(cspViolations, {
+    directive: sanitizeLabel(directive, "unknown"),
+    blocked_uri: sanitizeLabel(blockedUri, "unknown"),
+    document_uri: normalizePath(documentUri),
+  });
+}
+
+export function recordHttpRequest(
+  route: string,
+  statusCode: number,
+  durationMs: number,
+) {
   const routeLabel = normalizePath(route);
   const statusLabel = String(statusCode);
   incCounter(httpRequests, { route: routeLabel, status: statusLabel });
@@ -367,7 +420,9 @@ export function renderMetrics(): string {
           `${name}_bucket${renderLabels(entry.labels, { le: String(bucket) })} ${entry.counts[index]}`,
         );
       });
-      lines.push(`${name}_bucket${renderLabels(entry.labels, { le: "+Inf" })} ${entry.count}`);
+      lines.push(
+        `${name}_bucket${renderLabels(entry.labels, { le: "+Inf" })} ${entry.count}`,
+      );
       lines.push(`${name}_sum${renderLabels(entry.labels)} ${entry.sum}`);
       lines.push(`${name}_count${renderLabels(entry.labels)} ${entry.count}`);
     }
