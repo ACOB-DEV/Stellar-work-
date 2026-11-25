@@ -55,22 +55,36 @@ function formatDate(ts: number): { date: string; time: string } {
   };
 }
 
-function sumXlm(txns: Transaction[]): string {
-  // Sum up incoming flows minus outgoing flows for a net figure.
-  let net = 0n;
+/**
+ * Compute per-token net flows. Fee-breakdown rows (isFeeBreakdown) are
+ * excluded because they are explanatory only — the companion payment_received
+ * row already reflects the net amount (#1326). Amounts from different tokens
+ * are never mixed (#1328).
+ */
+function netFlowByToken(txns: Transaction[]): Record<string, bigint> {
+  const map: Record<string, bigint> = {};
   for (const tx of txns) {
-    if (tx.direction === "incoming") {
-      net += tx.amountStroops;
-    } else {
-      net -= tx.amountStroops;
-    }
+    if (tx.isFeeBreakdown) continue;
+    const delta = tx.direction === "incoming" ? tx.amountStroops : -tx.amountStroops;
+    map[tx.token] = (map[tx.token] ?? 0n) + delta;
   }
+  return map;
+}
+
+function formatNetFlow(net: bigint, token: string): string {
   const isNeg = net < 0n;
   const abs = isNeg ? -net : net;
-  // Convert stroops to XLM (7dp, show 2dp)
   const whole = abs / 10_000_000n;
   const frac = ((abs % 10_000_000n) * 100n) / 10_000_000n;
-  return `${isNeg ? "−" : "+"}${whole.toString()}.${frac.toString().padStart(2, "0")}`;
+  const tokenLabel = token && token !== "native" ? token : "XLM";
+  return `${isNeg ? "−" : "+"}${whole.toString()}.${frac.toString().padStart(2, "0")} ${tokenLabel}`;
+}
+
+function sumXlm(txns: Transaction[]): string {
+  const byToken = netFlowByToken(txns);
+  const entries = Object.entries(byToken);
+  if (entries.length === 0) return "+0.00 XLM";
+  return entries.map(([token, net]) => formatNetFlow(net, token)).join(" / ");
 }
 
 // ─── Page component ──────────────────────────────────────────────────────────
