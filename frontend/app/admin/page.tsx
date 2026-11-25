@@ -6,6 +6,8 @@ import {
   withdrawFees,
   adminGetAllJobs,
   adminGetJobCount,
+  getJobStatusCounts,
+  getPlatformFeeRate,
   setWhitelistMode,
   addToBlacklist,
   removeFromBlacklist,
@@ -13,25 +15,56 @@ import {
   removeFromWhitelist,
   isWhitelistModeEnabled,
 } from "@/lib/contract";
+import AdminPanelSkeleton from "@/components/AdminPanelSkeleton";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import EmptyState from "@/components/EmptyState";
 import ErrorBanner from "@/components/ErrorBanner";
 import StatusPill from "@/components/StatusPill";
 import SectionCard from "@/components/SectionCard";
+import TruncatedAddress from "@/components/TruncatedAddress";
 import { formatDeadline, toXlm } from "@/lib/format";
 import { isConfirmSuppressed, CONFIRM_KEYS } from "@/lib/confirm-prefs";
 import { useWallet } from "@/lib/wallet-context";
-import type { Job, JobStatus } from "@/lib/types";
-import { useEffect, useState, useCallback } from "react";
-import { ANNOUNCEMENT_STORAGE_KEY, type AnnouncementConfig } from "@/components/AnnouncementBanner";
+import type { Job, JobStatus, JobStatusCounts } from "@/lib/types";
+import { STATUS_TO_COUNTS_KEY } from "@/lib/types";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import {
+  ANNOUNCEMENT_STORAGE_KEY,
+  type AnnouncementConfig,
+} from "@/components/AnnouncementBanner";
+import {
+  sanitizeAnnouncementMessage,
+  validateStellarAddress,
+  MAX_ANNOUNCEMENT_MSG_LEN,
+} from "@/lib/sanitize";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  getAllFlagNames,
+  getFlagDescription,
+  initFeatureFlags,
+  setFlagOverride,
+  clearAllOverrides,
+  isEnabled,
+} from "@/lib/feature-flags";
 
 const TX_LOG_KEY = "stellarwork:admin-withdrawals";
+// #1050 — platform fee change history stored locally
+const FEE_HISTORY_KEY = "stellarwork:admin-fee-history";
+const ADMIN_JOBS_PAGE_SIZE = 50;
 
 interface WithdrawalTx {
   id: string;
   amount: string;
   timestamp: number;
   status: "completed";
+}
+
+interface FeeChangeRecord {
+  id: string;
+  feeBps: number;
+  note: string;
+  timestamp: number;
+  changedBy: string;
 }
 
 const STATUS_LABELS: Record<JobStatus, string> = {
@@ -49,6 +82,18 @@ export default function AdminPage() {
   const [fees, setFees] = useState<bigint>(0n);
   const [nativeToken, setNativeToken] = useState<string>("");
   const [jobs, setJobs] = useState<Array<{ id: number; job: Job }>>([]);
+  const [jobCount, setJobCount] = useState(0);
+  const [jobPage, setJobPage] = useState(0);
+  const [jobsLoading, setJobsLoading] = useState(false);
+  const [statusCounts, setStatusCounts] = useState<JobStatusCounts>({
+    open: 0,
+    in_progress: 0,
+    submitted_for_review: 0,
+    completed: 0,
+    cancelled: 0,
+    disputed: 0,
+    total: 0,
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [withdrawing, setWithdrawing] = useState(false);
@@ -58,7 +103,9 @@ export default function AdminPage() {
 
   // Announcement state
   const [announcementMsg, setAnnouncementMsg] = useState("");
-  const [announcementType, setAnnouncementType] = useState<"info" | "warning" | "error" | "success">("info");
+  const [announcementType, setAnnouncementType] = useState<
+    "info" | "warning" | "error" | "success"
+  >("info");
   const [announcementEnabled, setAnnouncementEnabled] = useState(false);
   const [announcementTtl, setAnnouncementTtl] = useState<number>(0);
 
@@ -66,6 +113,27 @@ export default function AdminPage() {
   const [accessTarget, setAccessTarget] = useState("");
   const [isWhitelistMode, setIsWhitelistMode] = useState(false);
   const [accessUpdating, setAccessUpdating] = useState(false);
+
+  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
+  const flagNames = useMemo(() => getAllFlagNames(), []);
+
+  // #1050 — platform fee history
+  const [feeHistory, setFeeHistory] = useState<FeeChangeRecord[]>([]);
+  const [feeChangeNote, setFeeChangeNote] = useState("");
+  const [liveFeeRateBps, setLiveFeeRateBps] = useState<number | null>(null);
+  const [recordingFee, setRecordingFee] = useState(false);
+
+  useEffect(() => {
+    initFeatureFlags();
+    const current: Record<string, boolean> = {};
+    for (const name of flagNames) {
+      current[name] = isEnabled(name);
+    }
+    const timer = setTimeout(() => {
+      setFeatureFlags(current);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [flagNames]);
 
   const fetchAdminData = useCallback(async (walletAddress: string) => {
     setLoading(true);
@@ -79,18 +147,38 @@ export default function AdminPage() {
       setFees(BigInt(accrued));
 
       const envAdmin = process.env.NEXT_PUBLIC_ADMIN_ADDRESS;
-      let actualAdmin = walletAddress;
-      if (envAdmin) {
-        setIsAdmin(walletAddress === envAdmin);
-        actualAdmin = envAdmin;
-      } else {
-        setIsAdmin(true);
+      if (!envAdmin || walletAddress !== envAdmin) {
+        setIsAdmin(false);
+        setJobCount(0);
+        setJobs([]);
+        setLoading(false);
+        return;
       }
+      setIsAdmin(true);
+      const actualAdmin = envAdmin;
 
       const count = await adminGetJobCount(actualAdmin);
-      const jobsList = await adminGetAllJobs(actualAdmin, 0, count);
-      const fetched = jobsList.map((job, idx) => ({ id: idx + 1, job }));
-      setJobs(fetched);
+      setJobCount(count);
+      setJobPage((currentPage) =>
+        Math.min(currentPage, Math.max(0, Math.ceil(count / ADMIN_JOBS_PAGE_SIZE) - 1)),
+      );
+
+      // Fetch status counts in a single contract call instead of
+      // iterating all jobs client-side.
+      try {
+        const counts = await getJobStatusCounts();
+        setStatusCounts(counts);
+      } catch {
+        setStatusCounts({
+          open: 0,
+          in_progress: 0,
+          submitted_for_review: 0,
+          completed: 0,
+          cancelled: 0,
+          disputed: 0,
+          total: count,
+        });
+      }
 
       const whitelistMode = await isWhitelistModeEnabled();
       setIsWhitelistMode(whitelistMode);
@@ -103,11 +191,53 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
+    if (!wallet || isAdmin !== true) return;
+    const actualAdmin = process.env.NEXT_PUBLIC_ADMIN_ADDRESS;
+    if (!actualAdmin) return;
+
+    const pageCount = Math.ceil(jobCount / ADMIN_JOBS_PAGE_SIZE);
+    if (jobPage >= pageCount && jobPage > 0) {
+      setJobPage(Math.max(0, pageCount - 1));
+      return;
+    }
+    if (jobCount === 0) {
+      setJobs([]);
+      setJobsLoading(false);
+      return;
+    }
+
+    const startIndex = jobPage * ADMIN_JOBS_PAGE_SIZE;
+    const limit = Math.min(ADMIN_JOBS_PAGE_SIZE, jobCount - startIndex);
+    let cancelled = false;
+    setJobsLoading(true);
+    setJobs([]);
+    adminGetAllJobs(actualAdmin, startIndex, limit)
+      .then((list) => {
+        if (!cancelled) {
+          setJobs(list.map((job, index) => ({ id: startIndex + index + 1, job })));
+        }
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setJobs([]);
+          setError(e instanceof Error ? e.message : "Failed to load jobs.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setJobsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [wallet, isAdmin, jobCount, jobPage]);
+
+  useEffect(() => {
     if (typeof window !== "undefined") {
       try {
         const raw = localStorage.getItem(TX_LOG_KEY);
         if (raw) setWithdrawals(JSON.parse(raw) as WithdrawalTx[]);
-        
+
         const rawAnn = localStorage.getItem(ANNOUNCEMENT_STORAGE_KEY);
         if (rawAnn) {
           const parsed = JSON.parse(rawAnn) as AnnouncementConfig;
@@ -115,11 +245,23 @@ export default function AdminPage() {
           setAnnouncementType(parsed.type);
           setAnnouncementEnabled(parsed.enabled);
         }
+
+        // #1050 — load fee change history
+        const rawFeeHist = localStorage.getItem(FEE_HISTORY_KEY);
+        if (rawFeeHist) setFeeHistory(JSON.parse(rawFeeHist) as FeeChangeRecord[]);
       } catch {
         /* ignore */
       }
     }
   }, []);
+
+  // #1050 — fetch live platform fee rate when admin data loads
+  useEffect(() => {
+    if (!wallet) return;
+    getPlatformFeeRate()
+      .then((bps) => { if (bps !== null) setLiveFeeRateBps(bps); })
+      .catch(() => {});
+  }, [wallet]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -139,6 +281,10 @@ export default function AdminPage() {
       setIsAdmin(null);
       setFees(0n);
       setJobs([]);
+      setJobCount(0);
+      setJobPage(0);
+      setJobsLoading(false);
+      setStatusCounts({ open: 0, in_progress: 0, submitted_for_review: 0, completed: 0, cancelled: 0, disputed: 0, total: 0 });
       setError(null);
       setSuccessMessage(null);
     }
@@ -176,12 +322,16 @@ export default function AdminPage() {
   };
 
   const handlePublishAnnouncement = () => {
+    const sanitized = sanitizeAnnouncementMessage(announcementMsg);
     const config: AnnouncementConfig = {
       id: `${Date.now()}`,
       type: announcementType,
-      message: announcementMsg,
+      message: sanitized,
       enabled: announcementEnabled,
-      expiresAt: announcementTtl > 0 ? Date.now() + announcementTtl * 60 * 60 * 1000 : null,
+      expiresAt:
+        announcementTtl > 0
+          ? Date.now() + announcementTtl * 60 * 60 * 1000
+          : null,
     };
     try {
       localStorage.setItem(ANNOUNCEMENT_STORAGE_KEY, JSON.stringify(config));
@@ -193,21 +343,40 @@ export default function AdminPage() {
     }
   };
 
-  const handleAccessAction = async (action: "addBlacklist" | "removeBlacklist" | "addWhitelist" | "removeWhitelist") => {
+  const handleAccessAction = async (
+    action:
+      | "addBlacklist"
+      | "removeBlacklist"
+      | "addWhitelist"
+      | "removeWhitelist",
+  ) => {
     if (!wallet || !accessTarget) return;
+    const validated = validateStellarAddress(accessTarget);
+    if (!validated) {
+      setError(
+        "Invalid Stellar address. Must start with G and be 56 characters.",
+      );
+      return;
+    }
     setAccessUpdating(true);
     setError(null);
     setSuccessMessage(null);
     try {
       const actualAdmin = process.env.NEXT_PUBLIC_ADMIN_ADDRESS || wallet;
-      if (action === "addBlacklist") await addToBlacklist(actualAdmin, accessTarget);
-      else if (action === "removeBlacklist") await removeFromBlacklist(actualAdmin, accessTarget);
-      else if (action === "addWhitelist") await addToWhitelist(actualAdmin, accessTarget);
-      else if (action === "removeWhitelist") await removeFromWhitelist(actualAdmin, accessTarget);
-      setSuccessMessage(`Successfully processed ${action} for ${accessTarget}`);
+      if (action === "addBlacklist")
+        await addToBlacklist(actualAdmin, validated);
+      else if (action === "removeBlacklist")
+        await removeFromBlacklist(actualAdmin, validated);
+      else if (action === "addWhitelist")
+        await addToWhitelist(actualAdmin, validated);
+      else if (action === "removeWhitelist")
+        await removeFromWhitelist(actualAdmin, validated);
+      setSuccessMessage(`Successfully processed ${action} for ${validated}`);
       setAccessTarget("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Access control action failed.");
+      setError(
+        e instanceof Error ? e.message : "Access control action failed.",
+      );
     } finally {
       setAccessUpdating(false);
     }
@@ -219,12 +388,17 @@ export default function AdminPage() {
     setError(null);
     setSuccessMessage(null);
     try {
-      const actualAdmin = process.env.NEXT_PUBLIC_ADMIN_ADDRESS || wallet;
+      const actualAdmin = process.env.NEXT_PUBLIC_ADMIN_ADDRESS;
+      if (!actualAdmin || actualAdmin !== wallet) throw new Error("Unauthorized");
       await setWhitelistMode(actualAdmin, !isWhitelistMode);
       setIsWhitelistMode(!isWhitelistMode);
-      setSuccessMessage(`Whitelist mode ${!isWhitelistMode ? "enabled" : "disabled"}.`);
+      setSuccessMessage(
+        `Whitelist mode ${!isWhitelistMode ? "enabled" : "disabled"}.`,
+      );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to toggle whitelist mode.");
+      setError(
+        e instanceof Error ? e.message : "Failed to toggle whitelist mode.",
+      );
     } finally {
       setAccessUpdating(false);
     }
@@ -235,11 +409,17 @@ export default function AdminPage() {
       <section className="mx-auto max-w-3xl space-y-6">
         <h1 className="text-2xl font-semibold">Admin Panel</h1>
         <SectionCard className="p-8 text-center">
-          <p className="text-slate-600">Connect your wallet to access admin controls.</p>
+          <p className="text-slate-600">
+            Connect your wallet to access admin controls.
+          </p>
           <button
             className="mt-4 rounded-md bg-slate-900 px-5 py-2.5 text-sm font-medium text-white"
             onClick={async () => {
-              try { await connectWallet(); } catch { /* cancelled */ }
+              try {
+                await connectWallet();
+              } catch {
+                /* cancelled */
+              }
             }}
           >
             Connect Wallet
@@ -253,7 +433,7 @@ export default function AdminPage() {
     return (
       <section className="mx-auto max-w-3xl space-y-6">
         <h1 className="text-2xl font-semibold">Admin Panel</h1>
-        <p className="text-sm text-slate-600">Loading admin data...</p>
+        <AdminPanelSkeleton />
       </section>
     );
   }
@@ -265,7 +445,7 @@ export default function AdminPage() {
         <div className="rounded-lg border border-red-200 bg-red-50 p-6 text-center">
           <p className="font-medium text-red-800">Unauthorized</p>
           <p className="mt-1 text-sm text-red-600">
-            Your wallet ({wallet.slice(0, 6)}...{wallet.slice(-4)}) is not the
+            Your wallet (<TruncatedAddress address={wallet} />) is not the
             contract admin.
           </p>
         </div>
@@ -273,10 +453,7 @@ export default function AdminPage() {
     );
   }
 
-  const statusCounts = jobs.reduce<Record<string, number>>((acc, { job }) => {
-    acc[job.status] = (acc[job.status] || 0) + 1;
-    return acc;
-  }, {});
+  const statusTotal = statusCounts.total || jobs.length;
 
   return (
     <section className="space-y-6">
@@ -322,19 +499,24 @@ export default function AdminPage() {
       <SectionCard title="Announcement Management">
         <div className="space-y-4 mt-4">
           <div>
-            <label className="block text-sm font-medium text-slate-700">Message (HTML supported)</label>
+            <label className="block text-sm font-medium text-slate-700">
+              Message (HTML supported)
+            </label>
             <textarea
               className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
               rows={3}
               value={announcementMsg}
               onChange={(e) => setAnnouncementMsg(e.target.value)}
               placeholder="E.g. Scheduled maintenance on Friday at 2AM UTC."
+              maxLength={MAX_ANNOUNCEMENT_MSG_LEN}
             />
           </div>
-          
+
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div>
-              <label className="block text-sm font-medium text-slate-700">Type</label>
+              <label className="block text-sm font-medium text-slate-700">
+                Type
+              </label>
               <select
                 className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
                 value={announcementType}
@@ -347,7 +529,9 @@ export default function AdminPage() {
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700">Duration (TTL)</label>
+              <label className="block text-sm font-medium text-slate-700">
+                Duration (TTL)
+              </label>
               <select
                 className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
                 value={announcementTtl}
@@ -367,20 +551,33 @@ export default function AdminPage() {
                   checked={announcementEnabled}
                   onChange={(e) => setAnnouncementEnabled(e.target.checked)}
                 />
-                <span className="text-sm font-medium text-slate-700">Enable Announcement</span>
+                <span className="text-sm font-medium text-slate-700">
+                  Enable Announcement
+                </span>
               </label>
             </div>
           </div>
 
           <div className="pt-2">
             <p className="text-sm font-medium text-slate-700 mb-2">Preview:</p>
-            <div className={`rounded-md p-3 text-sm font-medium text-white ${
-              announcementType === "info" ? "bg-blue-600" :
-              announcementType === "warning" ? "bg-amber-500" :
-              announcementType === "error" ? "bg-red-600" :
-              "bg-emerald-600"
-            }`}>
-              <div dangerouslySetInnerHTML={{ __html: announcementMsg || "<em>No message</em>" }} />
+            <div
+              className={`rounded-md p-3 text-sm font-medium text-white ${
+                announcementType === "info"
+                  ? "bg-blue-600"
+                  : announcementType === "warning"
+                    ? "bg-amber-500"
+                    : announcementType === "error"
+                      ? "bg-red-600"
+                      : "bg-emerald-600"
+              }`}
+            >
+              <div
+                dangerouslySetInnerHTML={{
+                  __html:
+                    sanitizeAnnouncementMessage(announcementMsg) ||
+                    "<em>No message</em>",
+                }}
+              />
             </div>
           </div>
 
@@ -399,7 +596,10 @@ export default function AdminPage() {
           <div className="flex items-center justify-between p-4 border border-slate-200 rounded-md bg-slate-50">
             <div>
               <p className="font-medium text-slate-900">Whitelist Mode</p>
-              <p className="text-sm text-slate-500">If enabled, only whitelisted users can interact with the platform.</p>
+              <p className="text-sm text-slate-500">
+                If enabled, only whitelisted users can interact with the
+                platform.
+              </p>
             </div>
             <button
               onClick={handleToggleWhitelistMode}
@@ -408,14 +608,18 @@ export default function AdminPage() {
                 isWhitelistMode ? "bg-slate-900" : "bg-slate-300"
               }`}
             >
-              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                isWhitelistMode ? "translate-x-6" : "translate-x-1"
-              }`} />
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  isWhitelistMode ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
             </button>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700">Target Address</label>
+            <label className="block text-sm font-medium text-slate-700">
+              Target Address
+            </label>
             <input
               type="text"
               className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
@@ -424,7 +628,7 @@ export default function AdminPage() {
               placeholder="G..."
             />
           </div>
-          
+
           <div className="flex flex-wrap gap-2 pt-2">
             <button
               className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
@@ -458,6 +662,66 @@ export default function AdminPage() {
           </div>
         </div>
       </SectionCard>
+
+      <SectionCard title="Feature Flags">
+        <div className="mt-4 space-y-3">
+          {flagNames.map((name) => (
+            <div
+              key={name}
+              className="flex items-center justify-between rounded-md border border-slate-200 p-3"
+            >
+              <div>
+                <p className="text-sm font-medium text-slate-900">{name}</p>
+                <p className="text-xs text-slate-500">
+                  {getFlagDescription(name)}
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={featureFlags[name] ?? false}
+                aria-label={`Toggle ${name}`}
+                onClick={() => {
+                  const next = !(featureFlags[name] ?? false);
+                  setFlagOverride(name, next);
+                  setFeatureFlags((prev) => ({ ...prev, [name]: next }));
+                }}
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                  featureFlags[name] ? "bg-slate-900" : "bg-slate-300"
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    featureFlags[name] ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+          ))}
+          <div className="flex items-center justify-between pt-2">
+            <p className="text-xs text-slate-400">
+              Overrides stored in localStorage. URL overrides:{" "}
+              <code className="rounded bg-slate-100 px-1 text-xs">
+                ?feature.flagName=true
+              </code>
+            </p>
+            <button
+              className="rounded-md border border-slate-300 px-3 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50"
+              onClick={() => {
+                clearAllOverrides();
+                const reset: Record<string, boolean> = {};
+                for (const name of flagNames) {
+                  reset[name] = false;
+                }
+                setFeatureFlags(reset);
+              }}
+            >
+              Reset All
+            </button>
+          </div>
+        </div>
+      </SectionCard>
+
       {showWithdrawConfirm && (
         <ConfirmDialog
           open={true}
@@ -478,13 +742,93 @@ export default function AdminPage() {
         />
       )}
 
+      {/* #1050 — Platform Fee Change History */}
+      <SectionCard title="Platform Fee History">
+        <div className="mt-3 space-y-4">
+          {liveFeeRateBps !== null && (
+            <p className="text-sm text-slate-700">
+              Current on-chain fee rate:{" "}
+              <strong className="font-semibold">{(liveFeeRateBps / 100).toFixed(2)}%</strong>
+            </p>
+          )}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-slate-700" htmlFor="fee-change-note">
+                Record a fee change note
+              </label>
+              <input
+                id="fee-change-note"
+                type="text"
+                className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+                placeholder={`e.g. Increased fee to ${liveFeeRateBps !== null ? (liveFeeRateBps / 100).toFixed(2) : "2.50"}% — market adjustment`}
+                value={feeChangeNote}
+                onChange={(e) => setFeeChangeNote(e.target.value)}
+                maxLength={200}
+              />
+            </div>
+            <button
+              className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={!feeChangeNote.trim() || recordingFee}
+              onClick={() => {
+                if (!wallet || !feeChangeNote.trim()) return;
+                setRecordingFee(true);
+                const entry: FeeChangeRecord = {
+                  id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  feeBps: liveFeeRateBps ?? 250,
+                  note: feeChangeNote.trim(),
+                  timestamp: Date.now(),
+                  changedBy: wallet,
+                };
+                setFeeHistory((prev) => {
+                  const next = [entry, ...prev].slice(0, 50);
+                  try { localStorage.setItem(FEE_HISTORY_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+                  return next;
+                });
+                setFeeChangeNote("");
+                setRecordingFee(false);
+              }}
+            >
+              Record
+            </button>
+          </div>
+          {feeHistory.length === 0 ? (
+            <p className="text-sm text-slate-400 italic">No fee change records yet. Use the form above to log a fee adjustment.</p>
+          ) : (
+            <div className="divide-y divide-slate-100 rounded-md border border-slate-200">
+              {feeHistory.map((entry) => (
+                <div key={entry.id} className="flex items-start justify-between px-4 py-3 text-sm">
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium text-slate-900 truncate">{entry.note}</p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Rate at time: <strong>{(entry.feeBps / 100).toFixed(2)}%</strong>{" • "}
+                      {new Date(entry.timestamp).toLocaleDateString("en-GB", {
+                        day: "numeric", month: "short", year: "numeric",
+                        hour: "2-digit", minute: "2-digit",
+                      })}
+                    </p>
+                  </div>
+                  <span className="ml-4 shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
+                    {(entry.feeBps / 100).toFixed(2)}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </SectionCard>
+
       {withdrawals.length > 0 && (
         <SectionCard title="Withdrawal History">
           <div className="mt-2 divide-y divide-slate-100">
             {withdrawals.slice(0, 10).map((tx) => (
-              <div key={tx.id} className="flex items-center justify-between py-2">
+              <div
+                key={tx.id}
+                className="flex items-center justify-between py-2"
+              >
                 <div>
-                  <p className="text-sm font-medium text-slate-900">{tx.amount} XLM</p>
+                  <p className="text-sm font-medium text-slate-900">
+                    {tx.amount} XLM
+                  </p>
                   <p className="text-xs text-slate-400">
                     {new Date(tx.timestamp).toLocaleDateString("en-GB", {
                       day: "numeric",
@@ -509,21 +853,86 @@ export default function AdminPage() {
         </SectionCard>
       )}
 
+      {/* ── Platform Analytics (#442) ─────────────────────────────────────────── */}
+      <SectionCard title="Platform Analytics">
+        <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="rounded-md border border-slate-200 p-3 text-center">
+            <p className="text-2xl font-bold tabular-nums">{jobs.length}</p>
+            <p className="text-xs text-slate-500">Total Jobs</p>
+          </div>
+          <div className="rounded-md border border-slate-200 p-3 text-center">
+            <p className="text-2xl font-bold tabular-nums">
+              {jobs.filter(({ job }) => job.status === "Completed").length}
+            </p>
+            <p className="text-xs text-slate-500">Completed</p>
+          </div>
+          <div className="rounded-md border border-slate-200 p-3 text-center">
+            <p className="text-2xl font-bold tabular-nums">
+              {jobs.filter(({ job }) => job.status === "Disputed").length}
+            </p>
+            <p className="text-xs text-slate-500">Disputed</p>
+          </div>
+          <div className="rounded-md border border-slate-200 p-3 text-center">
+            <p className="text-2xl font-bold tabular-nums">
+              {jobs.length > 0
+                ? `${Math.round(
+                    (jobs.filter(({ job }) => job.status === "Completed").length /
+                      jobs.length) *
+                      100,
+                  )}%`
+                : "—"}
+            </p>
+            <p className="text-xs text-slate-500">Completion Rate</p>
+          </div>
+        </div>
+        {jobs.length > 0 && (
+          <div className="mt-4 rounded-md border border-slate-200 p-3">
+            <p className="text-xs font-medium text-slate-500">Total Platform Volume</p>
+            <p className="mt-1 text-2xl font-bold tabular-nums">
+              {(
+                jobs.reduce((sum, { job }) => sum + Number(job.amount), 0) /
+                10_000_000
+              ).toFixed(2)}{" "}
+              <span className="text-base font-normal text-slate-500">XLM</span>
+            </p>
+            <p className="mt-1 text-xs text-slate-400">
+              Across all {jobs.length} posted job{jobs.length !== 1 ? "s" : ""}
+            </p>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-slate-400">
+          Full per-client breakdowns and historical trends are tracked in{" "}
+          <a
+            href="https://github.com/anumukul/Stellar-work-/issues/442"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-slate-600"
+          >
+            issue #442
+          </a>
+          .
+        </p>
+      </SectionCard>
+
       <SectionCard title="Job Overview">
         <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-6">
           <div className="rounded-md border border-slate-200 p-3 text-center">
-            <p className="text-2xl font-bold">{jobs.length}</p>
+            <p className="text-2xl font-bold">{statusTotal}</p>
             <p className="text-xs text-slate-500">Total</p>
           </div>
-          {(Object.keys(STATUS_LABELS) as JobStatus[]).map((status) => (
+          {(Object.keys(STATUS_LABELS) as JobStatus[]).map((status) => {
+            const key = STATUS_TO_COUNTS_KEY[status];
+            const count = statusCounts[key] ?? 0;
+            return (
             <div
               key={status}
               className="rounded-md border border-slate-200 p-3 text-center"
             >
-              <p className="text-2xl font-bold">{statusCounts[status] || 0}</p>
+              <p className="text-2xl font-bold">{count}</p>
               <p className="text-xs text-slate-500">{STATUS_LABELS[status]}</p>
             </div>
-          ))}
+          );
+          })}
         </div>
       </SectionCard>
 
@@ -541,26 +950,47 @@ export default function AdminPage() {
               </caption>
               <thead>
                 <tr className="border-b border-slate-200 text-xs text-slate-500">
-                  <th scope="col" className="pb-2 pr-4">ID</th>
-                  <th scope="col" className="pb-2 pr-4">Status</th>
-                  <th scope="col" className="pb-2 pr-4">Client</th>
-                  <th scope="col" className="pb-2 pr-4">Freelancer</th>
-                  <th scope="col" className="pb-2 pr-4 text-right">Amount</th>
-                  <th scope="col" className="pb-2 pr-4">Deadline</th>
+                  <th scope="col" className="pb-2 pr-4">
+                    ID
+                  </th>
+                  <th scope="col" className="pb-2 pr-4">
+                    Status
+                  </th>
+                  <th scope="col" className="pb-2 pr-4">
+                    Client
+                  </th>
+                  <th scope="col" className="pb-2 pr-4">
+                    Freelancer
+                  </th>
+                  <th scope="col" className="pb-2 pr-4 text-right">
+                    Amount
+                  </th>
+                  <th scope="col" className="pb-2 pr-4">
+                    Deadline
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {jobs.map(({ id, job }) => (
                   <tr key={id} className="border-b border-slate-100">
-                    <th scope="row" className="py-2 pr-4 font-medium">#{id}</th>
+                    <th scope="row" className="py-2 pr-4 font-medium">
+                      #{id}
+                    </th>
                     <td className="py-2 pr-4">
                       <StatusPill status={job.status} />
                     </td>
                     <td className="py-2 pr-4 font-mono text-xs">
-                      {job.client.slice(0, 8)}...
+                      <TruncatedAddress address={job.client} />
                     </td>
                     <td className="py-2 pr-4 font-mono text-xs">
-                      {job.freelancer ? `${job.freelancer.slice(0, 8)}...` : "-"}
+                      {job.freelancer
+                        ? `${job.freelancer.slice(0, 8)}...`
+                        : "-"}
+                      {job.freelancer ? (
+                        <TruncatedAddress address={job.freelancer} />
+                      ) : (
+                        "-"
+                      )}
                     </td>
                     <td className="py-2 pr-4 text-right">
                       <span className="inline-flex min-w-0 items-baseline justify-end gap-1">

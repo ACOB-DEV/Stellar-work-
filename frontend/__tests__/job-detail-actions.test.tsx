@@ -22,6 +22,11 @@ vi.mock("@/lib/contract", () => ({
   freelancerCancelJob: vi.fn(),
   getDescriptionCid: vi.fn(),
   storeDescriptionCid: vi.fn(),
+  getJobViews: vi.fn().mockResolvedValue(0),
+  recordJobView: vi.fn().mockResolvedValue(undefined),
+  rateJob: vi.fn(),
+  topUpEscrow: vi.fn(),
+  getJobCount: vi.fn().mockResolvedValue(0),
 }));
 
 vi.mock("@/lib/ipfs-service", () => ({
@@ -48,6 +53,19 @@ vi.mock("@/lib/notifications-context", () => ({
   getEventLabel: (event: string) => event,
 }));
 
+vi.mock("@/lib/meetings-context", () => ({
+  useMeetings: () => ({
+    meetings: [],
+    proposeMeeting: vi.fn(),
+    cancelMeeting: vi.fn(),
+    confirmMeeting: vi.fn(),
+    getMeetingsForJob: () => [],
+    getUpcomingMeetings: () => [],
+    getPastMeetings: () => [],
+  }),
+  MeetingsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+
 function makeJob(overrides: Partial<Job> = {}): Job {
   return {
     client: "GCLIENT",
@@ -59,6 +77,7 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     deadline: "0",
     token: "GTOKEN",
     revision_count: 0,
+    submitted_at: "0",
     ...overrides,
   };
 }
@@ -137,8 +156,8 @@ describe("Job detail action visibility", () => {
       </ToastProvider>,
     );
 
-    const button = await screen.findByRole("button", { name: "Accept Job" });
-    expect(button).toBeDisabled();
+    const button = await screen.findByRole("button", { name: "Connect Wallet" });
+    expect(button).toBeInTheDocument();
     expect(
       screen.getByText("Connect your wallet to enable contract actions."),
     ).toBeInTheDocument();

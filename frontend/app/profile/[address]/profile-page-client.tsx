@@ -1,8 +1,13 @@
 "use client";
 
 import ErrorBanner from "@/components/ErrorBanner";
+import AvailabilityIndicator from "@/components/AvailabilityIndicator";
 import StatusPill from "@/components/StatusPill";
-import { getJob, getJobCount, isBlacklisted, isWhitelisted, isWhitelistModeEnabled } from "@/lib/contract";
+import TruncatedAddress from "@/components/TruncatedAddress";
+import CertificateDownloadButton from "@/components/CertificateDownloadButton";
+import { buildCertificateData } from "@/lib/certificate-pdf";
+import { getJob, getJobCount, isBlacklisted, isWhitelisted, isWhitelistModeEnabled, getCertificates, getCertificateCount } from "@/lib/contract";
+import type { CompletionCertificate } from "@/lib/contract";
 import { toXlm } from "@/lib/format";
 import {
   MAX_BIO_LENGTH,
@@ -22,6 +27,15 @@ import {
   type Testimonial,
 } from "@/lib/portfolio";
 import type { Job } from "@/lib/types";
+import {
+  countActiveJobsFromProfileJobs,
+  emptyAvailability,
+  getEffectiveAvailability,
+  loadAvailability,
+  saveAvailability,
+  type AvailabilityPreference,
+  type FreelancerAvailability,
+} from "@/lib/availability";
 import { useWallet } from "@/lib/wallet-context";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -289,7 +303,7 @@ function TestimonialForm({
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function ProfilePageClient({ address }: { address: string }) {
-  const { wallet, connectWallet } = useWallet();
+  const { wallet } = useWallet();
 
   const [jobs, setJobs] = useState<ProfileJob[]>([]);
   const [loading, setLoading] = useState(false);
@@ -304,6 +318,8 @@ export default function ProfilePageClient({ address }: { address: string }) {
   const [draft, setDraft] = useState<Portfolio>(emptyPortfolio());
   const [testimonials, setTestimonials] = useState<Testimonial[]>([]);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [certificates, setCertificates] = useState<CompletionCertificate[]>([]);
+  const [availability, setAvailability] = useState<FreelancerAvailability>(emptyAvailability());
 
   const addressValid = isValidStellarAddress(address);
   const isOwner = wallet === address;
@@ -312,8 +328,10 @@ export default function ProfilePageClient({ address }: { address: string }) {
   // Load portfolio + testimonials from localStorage
   useEffect(() => {
     if (!addressValid) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPortfolio(loadPortfolio(address));
     setTestimonials(loadTestimonials(address));
+    setAvailability(loadAvailability(address));
   }, [address, addressValid]);
 
   const refreshTestimonials = useCallback(() => {
@@ -321,7 +339,7 @@ export default function ProfilePageClient({ address }: { address: string }) {
   }, [address]);
 
   const fetchJobs = useCallback(async () => {
-    if (!wallet || !addressValid) return;
+    if (!addressValid) return;
     setLoading(true);
     setError(null);
     try {
@@ -341,7 +359,7 @@ export default function ProfilePageClient({ address }: { address: string }) {
         } else {
           setRestricted(false);
         }
-      } catch (e) {
+      } catch {
         // ignore errors reading access control
       }
 
@@ -359,18 +377,38 @@ export default function ProfilePageClient({ address }: { address: string }) {
     } finally {
       setLoading(false);
     }
-  }, [wallet, address, addressValid]);
+  }, [address, addressValid]);
 
   useEffect(() => {
-    if (wallet) { fetchJobs(); }
-    else { setJobs([]); setLoading(false); setError(null); }
-  }, [wallet, fetchJobs]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void fetchJobs();
+  }, [fetchJobs]);
+
+  useEffect(() => {
+    if (!wallet || !addressValid) return;
+    let cancelled = false;
+    getCertificateCount(address)
+      .then((count) => {
+        if (cancelled || count === 0) return;
+        return getCertificates(address, 0, count);
+      })
+      .then((certs) => {
+        if (!cancelled && certs) setCertificates(certs);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [wallet, address, addressValid]);
 
   // Derived stats
   const jobsPosted = jobs.filter((j) => j.role === "client").length;
   const jobsCompleted = jobs.filter((j) => j.job.status === "Completed").length;
   const completedAsFreelancer = jobs.filter(
     (j) => j.role === "freelancer" && j.job.status === "Completed",
+  );
+  const activeJobsAsFreelancer = countActiveJobsFromProfileJobs(jobs, address);
+  const effectiveAvailability = getEffectiveAvailability(
+    availability.preference,
+    activeJobsAsFreelancer,
   );
   const totalEarnedStroops = completedAsFreelancer.reduce((sum, j) => {
     const a = BigInt(j.job.amount);
@@ -380,7 +418,42 @@ export default function ProfilePageClient({ address }: { address: string }) {
     .filter((j) => j.role === "client" && j.job.status === "Completed")
     .reduce((sum, j) => sum + BigInt(j.job.amount), 0n);
 
+  const reputationScore = (() => {
+    const completed = completedAsFreelancer.length;
+    const testimonialCount = testimonials.length;
+    const hasVerified = isProfileComplete(portfolio);
+    let score = 1;
+    score += Math.min(completed, 4);
+    score += Math.min(testimonialCount * 0.5, 2);
+    if (hasVerified) score += 0.5;
+    return Math.min(score, 5);
+  })();
+
+  const activityTimeline = [...jobs]
+    .sort((a, b) => Number(b.job.created_at) - Number(a.job.created_at))
+    .slice(0, 10)
+    .map(({ id, job, role }) => ({
+      id,
+      role,
+      job,
+      description:
+        role === "client"
+          ? job.status === "Completed"
+            ? `Approved Job #${id}`
+            : job.status === "Cancelled"
+              ? `Cancelled Job #${id}`
+              : `Posted Job #${id}`
+          : job.status === "Completed"
+            ? `Completed Job #${id}`
+            : job.status === "Cancelled"
+              ? `Cancelled Job #${id}`
+              : job.status === "SubmittedForReview"
+                ? `Submitted work for Job #${id}`
+                : `Accepted Job #${id}`,
+    }));
+
   function startEdit() {
+    if (!isOwner) return;
     setDraft({ ...portfolio, skills: [...portfolio.skills], links: [...portfolio.links], highlightedJobIds: [...portfolio.highlightedJobIds] });
     setEditMode(true);
     setSaveSuccess(false);
@@ -391,6 +464,7 @@ export default function ProfilePageClient({ address }: { address: string }) {
   }
 
   function saveEdit() {
+    if (!isOwner) return;
     const cleaned: Portfolio = {
       version: 1,
       bio: draft.bio.trim().slice(0, MAX_BIO_LENGTH),
@@ -432,26 +506,6 @@ export default function ProfilePageClient({ address }: { address: string }) {
   }
 
   // ── Not connected ────────────────────────────────────────────────────────
-  if (!wallet) {
-    return (
-      <section className="mx-auto max-w-3xl space-y-6">
-        <div className="flex items-center gap-4">
-          <Link href="/" className="text-sm text-blue-600 hover:underline">Back to Home</Link>
-          <h1 className="text-2xl font-semibold">Profile</h1>
-        </div>
-        <div className="rounded-lg border border-slate-200 bg-white p-8 text-center">
-          <p className="text-slate-600">Connect your wallet to view this profile.</p>
-          <button
-            className="mt-4 rounded-md bg-slate-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-slate-800"
-            onClick={async () => { try { await connectWallet(); } catch { /* cancelled */ } }}
-          >
-            Connect Wallet
-          </button>
-        </div>
-      </section>
-    );
-  }
-
   // Completed jobs eligible for highlights (as freelancer)
   const highlightableJobs = completedAsFreelancer;
   const highlightedJobs = jobs.filter((j) =>
@@ -461,7 +515,9 @@ export default function ProfilePageClient({ address }: { address: string }) {
   // Jobs where connected wallet is client and address is the freelancer (for testimonials)
   const clientCanTestifyJobs = jobs.filter(
     (j) =>
-      j.role === "client" &&
+      wallet &&
+      j.role === "freelancer" &&
+      j.job.client === wallet &&
       j.job.freelancer === address &&
       j.job.status === "Completed" &&
       wallet !== address,
@@ -480,6 +536,12 @@ export default function ProfilePageClient({ address }: { address: string }) {
               {verified && <VerifiedBadge />}
             </div>
             <p className="mt-1 font-mono text-sm text-slate-500 break-all">{address}</p>
+            <div className="mt-2">
+              <AvailabilityIndicator
+                address={address}
+                activeJobCount={activeJobsAsFreelancer}
+              />
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -529,10 +591,127 @@ export default function ProfilePageClient({ address }: { address: string }) {
         <ErrorBanner message={error} onDismiss={() => setError(null)} onRetry={() => void fetchJobs()} />
       )}
 
+      {isOwner && (
+        <div className="rounded-lg border border-blue-100 bg-blue-50/30 p-4 dark:border-blue-900/30 dark:bg-blue-950/20">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <svg className="h-5 w-5 text-blue-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+              <div>
+                <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  Account Security &amp; Key Management
+                </p>
+                <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                  Your wallet is non-custodial. Ensure you have backed up your 12-word recovery phrase.
+                </p>
+              </div>
+            </div>
+            <Link
+              href="/help"
+              className="shrink-0 text-xs font-semibold text-blue-600 hover:underline dark:text-blue-400"
+            >
+              View Recovery Guide &rarr;
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {isOwner && (
+        <div className="rounded-lg border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+          <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+            Freelancer availability
+          </h2>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Let clients know if you are open for new work. Saved on this device.
+          </p>
+          <div className="mt-4 space-y-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <AvailabilityIndicator
+                address={address}
+                activeJobCount={activeJobsAsFreelancer}
+              />
+              <span className="text-xs text-slate-500">
+                {activeJobsAsFreelancer} active job
+                {activeJobsAsFreelancer === 1 ? "" : "s"} on-chain
+              </span>
+            </div>
+            <div className="flex flex-col gap-1.5 sm:max-w-xs">
+              <label
+                htmlFor="availability-preference"
+                className="text-sm font-medium text-slate-800 dark:text-slate-200"
+              >
+                Availability status
+              </label>
+              <select
+                id="availability-preference"
+                value={availability.preference}
+                onChange={(e) => {
+                  const preference = e.target.value as AvailabilityPreference;
+                  setAvailability(
+                    saveAvailability(address, { ...availability, preference }),
+                  );
+                }}
+                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-800 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+              >
+                <option value="available">Available</option>
+                <option value="busy">Busy</option>
+                <option value="unavailable">Unavailable</option>
+              </select>
+            </div>
+            <label
+              htmlFor="open-to-offers"
+              className="flex cursor-pointer items-center justify-between gap-4"
+            >
+              <span className="flex flex-col gap-0.5">
+                <span className="text-sm font-medium text-slate-800 dark:text-slate-200">
+                  Open to offers
+                </span>
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  Show that you welcome new proposals even when busy.
+                </span>
+              </span>
+              <button
+                id="open-to-offers"
+                role="switch"
+                aria-checked={availability.openToOffers}
+                type="button"
+                onClick={() =>
+                  setAvailability(
+                    saveAvailability(address, {
+                      ...availability,
+                      openToOffers: !availability.openToOffers,
+                    }),
+                  )
+                }
+                className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  availability.openToOffers
+                    ? "bg-blue-600"
+                    : "bg-slate-200 dark:bg-slate-700"
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform ${
+                    availability.openToOffers ? "translate-x-5" : "translate-x-0"
+                  }`}
+                />
+              </button>
+            </label>
+            <p className="text-xs text-slate-400">
+              Clients see: <strong>{effectiveAvailability}</strong>
+              {effectiveAvailability === "busy" && activeJobsAsFreelancer > 0
+                ? ` (${activeJobsAsFreelancer} active)`
+                : ""}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Stats row */}
       {loading ? (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+          {Array.from({ length: 5 }).map((_, i) => (
             <div key={i} className="animate-pulse rounded-lg border border-slate-200 bg-white p-4">
               <div className="mx-auto h-8 w-16 rounded bg-slate-200" />
               <div className="mx-auto mt-2 h-3 w-20 rounded bg-slate-200" />
@@ -540,11 +719,41 @@ export default function ProfilePageClient({ address }: { address: string }) {
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
           <StatCard value={String(jobsPosted)} label="Jobs Posted" />
           <StatCard value={String(jobsCompleted)} label="Jobs Completed" />
+          <StatCard value={String(activeJobsAsFreelancer)} label="Active Jobs" />
           <StatCard value={toXlm(totalEarnedStroops)} label="XLM Earned" unit="XLM" />
           <StatCard value={toXlm(totalSpentStroops)} label="XLM Spent" unit="XLM" />
+        </div>
+      )}
+
+      {!loading && (
+        <div className="rounded-lg border border-slate-200 bg-white p-5">
+          <div className="flex items-center gap-3">
+            <h2 className="text-lg font-semibold">Reputation</h2>
+            <span className="inline-flex items-center gap-0.5" aria-label={`Reputation score: ${reputationScore.toFixed(1)} out of 5`}>
+              {[1, 2, 3, 4, 5].map((star) => {
+                const filled = reputationScore >= star;
+                const half = !filled && reputationScore >= star - 0.5;
+                return (
+                  <svg
+                    key={star}
+                    className={`h-5 w-5 ${filled ? "text-amber-400" : half ? "text-amber-300" : "text-slate-200"}`}
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                  </svg>
+                );
+              })}
+            </span>
+            <span className="text-sm font-medium text-slate-600">{reputationScore.toFixed(1)}/5</span>
+          </div>
+          <p className="mt-1 text-xs text-slate-400">
+            Based on {completedAsFreelancer.length} completed jobs, {testimonials.length} testimonials, and portfolio completeness.
+          </p>
         </div>
       )}
 
@@ -798,7 +1007,78 @@ export default function ProfilePageClient({ address }: { address: string }) {
         </>
       )}
 
-      {/* ── Job History ────────────────────────────────────────────────────── */}
+      {/* ── Activity Timeline ────────────────────────────────────────────────── */}
+      {!loading && activityTimeline.length > 0 && (
+        <div className="rounded-lg border border-slate-200 bg-white p-5">
+          <h2 className="text-lg font-semibold">Recent Activity</h2>
+          <div className="mt-3 space-y-3">
+            {activityTimeline.map((item) => (
+              <div key={`${item.id}-${item.role}`} className="flex items-start gap-3">
+                <div className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${
+                  item.job.status === "Completed" ? "bg-emerald-500" :
+                  item.job.status === "Cancelled" ? "bg-red-400" :
+                  item.job.status === "Disputed" ? "bg-amber-500" :
+                  "bg-blue-500"
+                }`} />
+                <div className="min-w-0 flex-1">
+                  <Link
+                    href={`/job/${item.id}`}
+                    className="text-sm font-medium text-blue-600 hover:underline"
+                  >
+                    {item.description}
+                  </Link>
+                  <div className="mt-0.5 flex items-center gap-2 text-xs text-slate-400">
+                    <StatusPill status={item.job.status} />
+                    <span>{toXlm(item.job.amount)} XLM</span>
+                    <span>·</span>
+                    <span>{new Date(Number(item.job.created_at) * 1000).toLocaleDateString()}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Completion Certificates ─────────────────────────────────────────── */}
+      {!loading && certificates.length > 0 && (
+        <div className="rounded-lg border border-slate-200 bg-white p-5">
+          <h2 className="text-lg font-semibold">Completion Certificates</h2>
+          <p className="mt-1 text-xs text-slate-400">{certificates.length} on-chain proof{certificates.length !== 1 ? "s" : ""} of completed work</p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {certificates.map((cert, idx) => (
+              <div
+                key={`${cert.job_id}-${idx}`}
+                className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-4"
+              >
+                <div className="flex items-center gap-2">
+                  <svg className="h-5 w-5 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M12 15l-2 5l9-9l-9-9l2 5" />
+                    <circle cx="12" cy="12" r="10" />
+                  </svg>
+                  <Link
+                    href={`/job/${cert.job_id}`}
+                    className="text-sm font-semibold text-blue-600 hover:underline"
+                  >
+                    Job #{cert.job_id}
+                  </Link>
+                </div>
+                <div className="mt-2 space-y-1 text-xs text-slate-600">
+                  <p><span className="font-medium">Client:</span> <TruncatedAddress address={cert.client} /></p>
+                  <p><span className="font-medium">Amount:</span> {toXlm(cert.amount)} XLM</p>
+                  <p><span className="font-medium">Completed:</span> ledger {cert.completed_at}</p>
+                </div>
+                <div className="mt-3">
+                  <CertificateDownloadButton
+                    variant="compact"
+                    certificateData={buildCertificateData(cert)}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {!loading && (
         <div className="rounded-lg border border-slate-200 bg-white p-5">
           <h2 className="text-lg font-semibold">Job History</h2>

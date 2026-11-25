@@ -1,4 +1,91 @@
-# Escrow Contract — Gas & Fee Reference
+# Escrow Contract — Deployment, Gas & Fee Reference
+
+## Deployment Workflow
+
+Automated deployment scripts are available in the `scripts/` directory.
+
+### Quick Deploy
+
+```bash
+./scripts/deploy.sh testnet --admin <ADMIN_ADDRESS> --native-token <TOKEN_ADDRESS>
+```
+
+### Step-by-Step Deployment
+
+#### 1. Deploy Contract
+
+```bash
+./scripts/deploy.sh <testnet|futurenet|mainnet>
+```
+
+This script:
+- Configures the Soroban network if not already registered
+- Builds the contract WASM via `soroban contract build`
+- Deploys to the target network and returns the contract ID
+- Saves the contract address to `contract-addresses.json`
+- Generates `.env.<network>` with the contract ID and RPC URL
+
+#### 2. Initialize Contract
+
+```bash
+./scripts/init.sh <network> --contract-id <ID> --admin <ADMIN_ADDRESS> --native-token <TOKEN_ADDRESS>
+```
+
+Required parameters:
+- `--contract-id`: The contract ID returned from deployment
+- `--admin`: Admin wallet address (G...)
+- `--native-token`: Native token contract address
+
+Optional:
+- `--source`: Soroban identity (default: `stellarwork-admin`)
+
+#### 3. Configure Frontend
+
+```bash
+cp .env.<network> frontend/.env.local
+```
+
+Or set the environment variables manually:
+
+```bash
+NEXT_PUBLIC_CONTRACT_ID=<CONTRACT_ID>
+NEXT_PUBLIC_NETWORK=<testnet|futurenet|mainnet>
+NEXT_PUBLIC_SOROBAN_RPC=<RPC_URL>
+```
+
+### Contract Upgrade
+
+To upgrade the contract WASM on an existing deployment:
+
+```bash
+./scripts/upgrade.sh <network> <contract-id>
+```
+
+This installs the new WASM, obtains its hash, and invokes the contract's
+`upgrade` function with the new hash. The contract must support the upgrade
+interface.
+
+### Contract Addresses
+
+Deployed contract addresses are tracked in `contract-addresses.json` at the
+repository root. Each network entry stores:
+
+- `contractId` — The deployed contract address
+- `wasmHash` — The installed WASM hash (set after upgrade)
+- `admin` — Admin wallet address
+- `nativeToken` — Native token contract address
+- `rpcUrl` — RPC endpoint for the network
+- `passphrase` — Network passphrase
+- `horizonUrl` — Horizon API endpoint
+- `explorerUrl` — StellarExpert explorer base URL
+
+### Network Configuration
+
+| Network | RPC URL | Passphrase |
+|---------|---------|------------|
+| testnet | `https://soroban-testnet.stellar.org` | `Test SDF Network ; September 2015` |
+| futurenet | `https://rpc-futurenet.stellar.org` | `Test SDF Future Network ; October 2022` |
+| mainnet | `https://mainnet.sorobanrpc.com` | `Public Global Stellar Network ; September 2015` |
 
 ## Contract Size
 
@@ -57,6 +144,11 @@ Values are estimates from local `soroban contract invoke` dry-runs against a sta
 | `ClientReferrer(addr)` | Address | Client → referrer |
 | `ReferralBonusPaid(addr)` | bool | One-time bonus flag |
 
+The deprecated whitelist aliases delegate to the canonical allowlist entrypoints
+and use the same `AllowedToken(token)` storage key. Existing deployed state is
+preserved without migration; keep the aliases available for integrations that
+still invoke them.
+
 ## TTL Bump Strategy
 
 | Category | Threshold | Bump Amount |
@@ -75,7 +167,9 @@ Values are estimates from local `soroban contract invoke` dry-runs against a sta
 
 4. **Fee tier lookups** iterate through all tiers on every fee calculation. When no tiers are configured, the function returns immediately using the default fee — this is already optimized.
 
-5. **Access control checks** (`require_active_access`) perform 2-3 storage reads per invocation (blacklist + whitelist mode + whitelist entry). These are called on every authenticated contract invocation and could be cached per-transaction.
+5. **Access control checks** (`require_active_access`) perform up to 2-3 storage reads per invocation (blacklist + whitelist mode + whitelist entry). PERF-01 short-circuits whitelist persistent reads when whitelist mode is off, and mutation helpers reuse a single job load for status checks.
+
+6. **PERF-01 batch reads.** Prefer `get_jobs_batch` for list views and `get_job_requiring_status` in write paths so job data and status are not fetched separately.
 
 ## Benchmarking
 
@@ -86,3 +180,14 @@ Run the benchmark script:
 ```
 
 This builds the contract in release mode and simulates each function, reporting storage bytes read/written and estimated CPU cost.
+
+## SC-82 Job Archive
+
+Admin-triggered archive moves old completed/cancelled jobs out of active storage:
+
+- `ARCHIVE_THRESHOLD` — 180 days (ledger timestamp seconds)
+- `archive_old_jobs(admin, cutoff_timestamp) -> u64` — archives eligible jobs, emits `job_archived`
+- `get_archived_job(admin, job_id) -> Option<Job>` — archived record (same schema as active jobs)
+- `get_archive_count(admin) -> u64` — monitoring helper
+
+Active listing APIs only read `DataKey::Job`; archived entries live under `DataKey::ArchivedJob` and are excluded automatically.

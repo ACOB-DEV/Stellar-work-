@@ -31,7 +31,19 @@ vi.mock("@stellar/stellar-sdk", () => {
     addOperation(op: unknown) { this.operations.push(op); return this; }
     setTimeout() { return this; }
     build() { return { __tx: true, source: this.source, operations: this.operations }; }
-    static fromXDR(xdrValue: string) { return { __tx: true, fromXdr: xdrValue }; }
+    static fromXDR(xdrValue: string) {
+      // Return a realistic signed transaction so Transaction verification
+      // (Issue #855) passes before the tx reaches sendTransaction.
+      return {
+        __tx: true,
+        fromXdr: xdrValue,
+        source: "GWALLET",
+        fee: "100",
+        operations: [{ type: "invokeHostFunction" }],
+        timeBounds: null,
+        hash: () => ({ toString: () => "deadbeef" }),
+      };
+    }
   }
   return {
     Account: _Account,
@@ -88,7 +100,13 @@ describe("callContract sendTransaction error path", () => {
     isSimulationSuccess.mockReturnValue(true);
     simulateTransaction.mockResolvedValue({ result: { retval: {} } });
     assembleTransactionBuild.mockReturnValue({ toXDR: () => "ASSEMBLED_XDR" });
-    prepareTransaction.mockResolvedValue({ toXDR: () => "PREPARED_XDR" });
+    prepareTransaction.mockResolvedValue({
+      toXDR: () => "PREPARED_XDR",
+      source: "GWALLET",
+      fee: "100",
+      operations: [{ type: "invokeHostFunction" }],
+      timeBounds: null,
+    });
     signTransactionSpy.mockResolvedValue({ signedTxXdr: "SIGNED_XDR" });
   });
 
@@ -144,6 +162,16 @@ describe("callContract sendTransaction error path", () => {
     expect(result.hash).toBe("TX_HASH_FAIL");
   });
 
+  it("decodes the contract return value after transaction confirmation", async () => {
+    sendTransaction.mockResolvedValue({ status: "PENDING", hash: "TX_HASH_OK" });
+    getTransaction.mockResolvedValue({ status: "SUCCESS", returnValue: 17n });
+
+    const result = await callContract("CCONTRACT", "post_job", [], {
+      pollTimeout: 500,
+    });
+
+    expect(result).toEqual({ status: "SUCCESS", hash: "TX_HASH_OK", data: 17n });
+  });
   it("does not call signTransaction when simulation itself errors", async () => {
     isSimulationError.mockReturnValue(true);
     simulateTransaction.mockResolvedValue({ error: "sim failed" });

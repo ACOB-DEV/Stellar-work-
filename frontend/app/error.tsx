@@ -1,15 +1,30 @@
 "use client";
 
 import Link from "next/link";
+import * as Sentry from "@sentry/nextjs";
 import { useEffect, useId, useState } from "react";
 
 export default function GlobalError({
   error,
+  retry,
   reset,
 }: {
   error: Error & { digest?: string };
-  reset: () => void;
+  /**
+   * Next 16.3 (stable): re-fetches and re-renders the boundary's children.
+   * This is what a user pressing "Try again" expects — most errors here come
+   * from a failed data fetch, and re-rendering without re-fetching reproduces
+   * the same failure, so the button appears to do nothing.
+   */
+  retry?: () => void;
+  /**
+   * Pre-16.3 name, kept so the component still recovers on an older runtime.
+   * `reset` clears the error state without re-fetching.
+   */
+  reset?: () => void;
 }) {
+  // Prefer retry; fall back to reset so neither runtime leaves a dead button.
+  const recover = retry ?? reset ?? (() => undefined);
   const uid = useId();
   const [errorId] = useState(() => {
     const ts = Date.now().toString(36).toUpperCase();
@@ -18,7 +33,19 @@ export default function GlobalError({
   });
 
   useEffect(() => {
-    // eslint-disable-next-line no-console
+    // Report to Sentry with the local reference ID attached as a tag so
+    // support can cross-reference the error ID shown to the user with the
+    // event in the Sentry dashboard.
+    Sentry.captureException(error, {
+      tags: {
+        errorBoundary: "global",
+        errorId,
+        // Attach Next.js digest when present — it identifies the server-side
+        // error that triggered this client boundary.
+        ...(error.digest ? { nextDigest: error.digest } : {}),
+      },
+    });
+
     console.error("[StellarWork]", errorId, error);
   }, [error, errorId]);
 
@@ -57,7 +84,7 @@ export default function GlobalError({
       <div className="flex flex-wrap justify-center gap-3">
         <button
           type="button"
-          onClick={reset}
+          onClick={recover}
           className="rounded-lg bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
         >
           Try again

@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Spinner from "@/components/Spinner";
 import { useModalFocusTrap } from "@/lib/modal";
 import { suppressConfirm, type ConfirmKey } from "@/lib/confirm-prefs";
 
@@ -89,6 +90,7 @@ export default function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const [dontShowAgain, setDontShowAgain] = useState(false);
   const styles = VARIANT_STYLES[variant];
 
@@ -104,7 +106,39 @@ export default function ConfirmDialog({
     onConfirm();
   }, [dontShowAgain, loading, onConfirm, suppressKey]);
 
-  useModalFocusTrap(open, dialogRef, handleCancel);
+  useModalFocusTrap(open, dialogRef, handleCancel, {
+    initialFocusRef: cancelButtonRef,
+    shouldCloseOnEscape: () => !loading,
+  });
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isEditableField =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        target instanceof HTMLButtonElement ||
+        (target?.isContentEditable ?? false);
+
+      if (
+        event.key === "Enter" &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        !isEditableField
+      ) {
+        event.preventDefault();
+        handleConfirm();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [handleConfirm, open]);
 
   if (!open) return null;
 
@@ -203,6 +237,7 @@ export default function ConfirmDialog({
         {/* ── Footer buttons ──────────────────────────────────────── */}
         <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-6 py-4">
           <button
+            ref={cancelButtonRef}
             type="button"
             onClick={handleCancel}
             disabled={loading}
@@ -217,12 +252,7 @@ export default function ConfirmDialog({
             className={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 transition-colors ${styles.confirm}`}
             aria-busy={loading}
           >
-            {loading && (
-              <span
-                className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current/30 border-t-current"
-                aria-hidden="true"
-              />
-            )}
+            {loading && <Spinner size={14} color="currentColor" label="Processing" />}
             {loading ? "Processing…" : confirmLabel}
           </button>
         </div>

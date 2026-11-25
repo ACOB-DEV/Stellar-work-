@@ -6,7 +6,12 @@ import {
   useEffect,
   useCallback,
 } from "react";
+import TruncatedAddress from "@/components/TruncatedAddress";
 import { useWallet } from "@/lib/wallet-context";
+import ConfirmDialog from "@/components/ConfirmDialog";
+import { CONFIRM_KEYS } from "@/lib/confirm-prefs";
+import { truncateAddress } from "@/lib/stellar";
+import { useTranslations } from "next-intl";
 
 /**
  * WalletMenu — desktop nav dropdown shown when a wallet is connected.
@@ -18,9 +23,12 @@ import { useWallet } from "@/lib/wallet-context";
  *  - Keyboard accessible (Escape closes, arrow keys move between items)
  */
 export default function WalletMenu() {
+  const t = useTranslations("wallet");
+  const common = useTranslations("common");
   const { wallet, connectWallet, disconnectWallet, switchAccount, isSwitching } = useWallet();
   const [open, setOpen] = useState(false);
   const [confirmSwitch, setConfirmSwitch] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [connecting, setConnecting] = useState(false);
 
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -83,11 +91,20 @@ export default function WalletMenu() {
     }
   }, []);
 
-  const handleDisconnect = useCallback(() => {
+  const handleDisconnectRequest = useCallback(() => {
+    setConfirmDisconnect(true);
+  }, []);
+
+  const handleDisconnectConfirm = useCallback(() => {
+    setConfirmDisconnect(false);
     disconnectWallet();
     setOpen(false);
     setConfirmSwitch(false);
   }, [disconnectWallet]);
+
+  const handleDisconnectCancel = useCallback(() => {
+    setConfirmDisconnect(false);
+  }, []);
 
   const handleSwitchRequest = useCallback(() => {
     setConfirmSwitch(true);
@@ -121,12 +138,12 @@ export default function WalletMenu() {
         disabled={connecting}
         aria-busy={connecting}
       >
-        {connecting ? "Connecting…" : "Connect Wallet"}
+        {connecting ? t("connecting") : t("connect")}
       </button>
     );
   }
 
-  const shortAddress = `${wallet.slice(0, 6)}…${wallet.slice(-4)}`;
+  const shortAddress = truncateAddress(wallet);
 
   return (
     <div className="relative">
@@ -140,7 +157,7 @@ export default function WalletMenu() {
         }}
         aria-haspopup="true"
         aria-expanded={open}
-        aria-label={`Wallet menu — connected as ${shortAddress}`}
+        aria-label={t("menuLabel", { address: shortAddress })}
         className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
       >
         {/* Green "connected" dot */}
@@ -148,7 +165,9 @@ export default function WalletMenu() {
           className="h-2 w-2 rounded-full bg-emerald-500 shrink-0"
           aria-hidden="true"
         />
-        <span className="font-mono text-xs">{shortAddress}</span>
+        <span className="font-mono text-xs">
+          <TruncatedAddress address={wallet} className="font-mono text-xs" focusable={false} />
+        </span>
         {/* Chevron */}
         <svg
           className={`h-3.5 w-3.5 text-slate-400 transition-transform duration-150 ${open ? "rotate-180" : ""}`}
@@ -167,7 +186,11 @@ export default function WalletMenu() {
         <div
           ref={menuRef}
           role="menu"
-          aria-label="Wallet options"
+          aria-label={t("optionsLabel")}
+          // A11Y-31 (#769): a menu that handles arrow keys must be able to
+          // receive focus, or the handler never fires. -1 keeps it out of the
+          // tab order while allowing focus() when the menu opens.
+          tabIndex={-1}
           onKeyDown={handleMenuKeyDown}
           className="absolute right-0 z-50 mt-2 w-72 rounded-xl border border-slate-200 bg-white shadow-lg ring-1 ring-black/5 focus:outline-none"
         >
@@ -176,7 +199,7 @@ export default function WalletMenu() {
               {/* Address section */}
               <div className="px-4 py-3 border-b border-slate-100">
                 <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">
-                  Connected account
+                  {t("connectedAccount")}
                 </p>
                 <div className="flex items-center gap-2">
                   <span
@@ -196,9 +219,9 @@ export default function WalletMenu() {
                     navigator.clipboard.writeText(wallet).catch(() => undefined);
                   }}
                   className="mt-2 text-xs text-blue-600 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 rounded"
-                  aria-label="Copy wallet address to clipboard"
+                  aria-label={t("copyAddressAria")}
                 >
-                  Copy address
+                  {t("copyAddress")}
                 </button>
               </div>
 
@@ -226,7 +249,7 @@ export default function WalletMenu() {
                       d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4"
                     />
                   </svg>
-                  {isSwitching ? "Switching…" : "Switch Account"}
+                  {isSwitching ? t("switching") : t("switchAccount")}
                 </button>
 
                 <div className="my-1 border-t border-slate-100" role="separator" />
@@ -234,7 +257,7 @@ export default function WalletMenu() {
                 <button
                   role="menuitem"
                   type="button"
-                  onClick={handleDisconnect}
+                  onClick={handleDisconnectRequest}
                   className="flex w-full items-center gap-3 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 focus-visible:bg-red-50 focus:outline-none"
                 >
                   {/* Disconnect icon */}
@@ -252,7 +275,7 @@ export default function WalletMenu() {
                       d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"
                     />
                   </svg>
-                  Disconnect Wallet
+                  {t("disconnectWallet")}
                 </button>
               </div>
             </>
@@ -277,10 +300,9 @@ export default function WalletMenu() {
                   </svg>
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-slate-900">Switch Account?</p>
+                  <p className="text-sm font-semibold text-slate-900">{t("switchAccountTitle")}</p>
                   <p className="mt-1 text-xs text-slate-500 leading-relaxed">
-                    Freighter will ask you to select a different account. Your job cache will be
-                    cleared and data will refresh for the new account.
+                    {t("switchAccountDescription")}
                   </p>
                 </div>
               </div>
@@ -292,7 +314,7 @@ export default function WalletMenu() {
                   disabled={isSwitching}
                   className="flex-1 rounded-md bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
                 >
-                  {isSwitching ? "Switching…" : "Yes, Switch"}
+                  {isSwitching ? t("switching") : t("yesSwitch")}
                 </button>
                 <button
                   role="menuitem"
@@ -300,12 +322,27 @@ export default function WalletMenu() {
                   onClick={handleSwitchCancel}
                   className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
                 >
-                  Cancel
+                  {common("cancel")}
                 </button>
               </div>
             </div>
           )}
         </div>
+      )}
+
+      {confirmDisconnect && (
+        <ConfirmDialog
+          open={true}
+          title={t("disconnectTitle")}
+          description={t("disconnectDescription")}
+          consequences={[t("disconnectConsequenceSaved"), t("disconnectConsequenceReconnect")]}
+          confirmLabel={t("yesDisconnect")}
+          cancelLabel={common("cancel")}
+          variant="danger"
+          suppressKey={CONFIRM_KEYS.disconnectWallet}
+          onConfirm={handleDisconnectConfirm}
+          onCancel={handleDisconnectCancel}
+        />
       )}
     </div>
   );

@@ -1,30 +1,93 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Link from "next/link";
 import { NextIntlClientProvider } from "next-intl";
-import { getLocale, getMessages } from "next-intl/server";
+import { getLocale, getMessages, getTranslations } from "next-intl/server";
 import { WalletProvider } from "@/lib/wallet-context";
 import { ToastProvider } from "@/components/ToastProvider";
 import { NotificationProvider } from "@/lib/notifications-context";
 import { MessagingProvider } from "@/lib/messaging-context";
+import { MeetingsProvider } from "@/lib/meetings-context";
 import { ThemeProvider } from "@/components/ThemeProvider";
+import { TypographyProvider } from "@/lib/typography-context";
+import { NetworkProvider } from "@/lib/network-context";
 import { Navigation } from "./navigation";
 import { ScrollRestorer } from "@/components/ScrollRestorer";
 import ErrorBoundary from "@/components/ErrorBoundary";
-import CommandPalette from "@/components/CommandPalette";
-import OnboardingProvider from "@/components/OnboardingProvider";
-import AnnouncementBanner from "@/components/AnnouncementBanner";
 import JsonLd from "@/components/JsonLd";
-import Link from "next/link";
+import AppFooter from "@/components/AppFooter";
+import OfflineIndicator from "@/components/OfflineIndicator";
+import { PWAInstallPrompt } from "@/components/pwa-install-prompt";
+import WalletNetworkWarning from "@/components/WalletNetworkWarning";
+import DeferredClientFeatures from "@/components/DeferredClientFeatures";
+import { ClientProviders } from "./client-providers";
 import "./globals.css";
+
+// ── Font loading strategy ────────────────────────────────────────────────────
+//
+// Geist Sans (primary text):
+//   display:"optional" — the browser uses the fallback on first visit when the
+//   font hasn't loaded within the very short optional period (≈100 ms). On all
+//   subsequent visits the woff2 is already in the HTTP cache and loads
+//   instantly with zero layout shift. This is the strongest available CLS
+//   guarantee; no reflow ever occurs.
+//
+//   adjustFontFallback:true — Next.js computes Geist's exact ascent, descent,
+//   line-gap, and advance-width metrics and emits a @font-face for the fallback
+//   that adjusts those values to match. This makes the fallback
+//   "size-adjusted": text occupies the same line boxes as the real font, so
+//   even when the font loads late it causes no measurable layout shift.
+//
+//   preload:true — emits a <link rel="preload" as="font"> in the document
+//   <head> so the woff2 is fetched at the highest priority and is usually
+//   already in-flight before the render tree is ready.
+//
+// Geist Mono (code / Stellar addresses):
+//   display:"swap" — monospace content is semantically tied to its exact
+//   character spacing, so a FOUT (flash of unstyled text) is preferable to
+//   showing a proportional system fallback for blockchain hashes/addresses.
+//   Users need to read or copy those strings immediately; the substitution
+//   would break the visual expectation even if it doesn't shift layout.
+//
+// Both fonts:
+//   subsets:["latin"] — only the Latin-1 Supplement subset is embedded. The
+//   Stellar UI deals exclusively with ASCII identifiers and English/Latin UI
+//   strings, so no other subsets are needed. Reducing the subset trims the
+//   woff2 payload by ~30–40 % compared to the full font file.
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
+  display: "optional",
+  preload: true,
+  adjustFontFallback: true,
+  fallback: [
+    "system-ui",
+    "-apple-system",
+    "BlinkMacSystemFont",
+    "Segoe UI",
+    "Helvetica Neue",
+    "Arial",
+    "sans-serif",
+  ],
 });
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+  display: "swap",
+  preload: true,
+  adjustFontFallback: true,
+  fallback: [
+    "ui-monospace",
+    "SFMono-Regular",
+    "Menlo",
+    "Monaco",
+    "Consolas",
+    "Liberation Mono",
+    "Courier New",
+    "monospace",
+  ],
 });
 
 export const viewport: Viewport = {
@@ -36,7 +99,7 @@ export const viewport: Viewport = {
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? "https://stellarwork.app";
 
 export const metadata: Metadata = {
-  metadataBase: new URL(BASE_URL),
+    metadataBase: new URL(BASE_URL),
   title: {
     default: "StellarWork — Decentralized Freelance Marketplace on Stellar",
     template: "%s | StellarWork",
@@ -55,6 +118,7 @@ export const metadata: Metadata = {
   ],
   authors: [{ name: "StellarWork" }],
   creator: "StellarWork",
+  manifest: "/manifest.json",
   openGraph: {
     type: "website",
     locale: "en_US",
@@ -92,6 +156,9 @@ export const metadata: Metadata = {
   },
   alternates: {
     canonical: BASE_URL,
+    types: {
+      "application/rss+xml": "/feed.xml",
+    },
   },
 };
 
@@ -102,6 +169,21 @@ export default async function RootLayout({
 }>) {
   const locale = await getLocale();
   const messages = await getMessages();
+  const common = await getTranslations("common");
+  const footer = await getTranslations("footer");
+  const footerMessages = {
+    siteTagline: common("siteTagline"),
+    github: footer("github"),
+    documentation: footer("documentation"),
+    tokenomics: footer("tokenomics"),
+    license: footer("license"),
+    builtOn: common("builtOn"),
+    allRightsReserved: common("allRightsReserved"),
+    buildTime: footer("buildTime"),
+    commit: footer("commit"),
+    environment: footer("environment"),
+    appVersion: footer("appVersion"),
+  };
 
   return (
     <html
@@ -126,54 +208,112 @@ export default async function RootLayout({
           }}
         />
         <NextIntlClientProvider messages={messages} locale={locale}>
-        <ThemeProvider>
-        <WalletProvider>
-          <NotificationProvider>
-          <MessagingProvider>
-          <ToastProvider>
-          <a
-            href="#main-content"
-            className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-md focus:bg-white focus:px-3 focus:py-2 focus:text-slate-900 focus:outline-none dark:focus:bg-slate-800 dark:focus:text-slate-100"
-          >
-            Skip to main content
-          </a>
-          <AnnouncementBanner />
-          <Navigation />
-          <CommandPalette />
-          <OnboardingProvider />
-          <ScrollRestorer />
-          <main id="main-content" tabIndex={-1} className="mx-auto w-full max-w-5xl flex-1 px-3 py-6 sm:px-4 sm:py-8">
-            <ErrorBoundary>{children}</ErrorBoundary>
-          </main>
-          <footer className="mt-auto border-t border-slate-200 bg-white py-8 pb-[calc(2rem+env(safe-area-inset-bottom))] dark:border-slate-800 dark:bg-slate-900">
-            <div className="mx-auto max-w-5xl px-4">
-              <div className="flex flex-col items-center justify-between gap-6 md:flex-row">
-                <div className="flex flex-col items-center gap-2 md:items-start">
-                  <span className="text-lg font-bold text-slate-900 dark:text-slate-100">StellarWork</span>
-                  <p className="text-sm text-slate-500 dark:text-slate-400">Decentralized Escrow Marketplace</p>
-                </div>
+          <ThemeProvider>
+            <TypographyProvider>
+              <NetworkProvider>
+                <WalletProvider>
+                  <NotificationProvider>
+                    <MessagingProvider>
+                      <MeetingsProvider>
+                        <ToastProvider
+                          messages={{
+                            close: common("close"),
+                            dismissNotification: common("dismissNotification"),
+                          }}
+                        >
+                          <a
+                            href="#main-content"
+                            className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-md focus:bg-white focus:px-3 focus:py-2 focus:text-slate-900 focus:outline-none dark:focus:bg-slate-800 dark:focus:text-slate-100"
+                          >
+                            {common("skipToContent")}
+                          </a>
+                          <DeferredClientFeatures />
+                          <ClientProviders>
+                            <OfflineIndicator />
+                            <PWAInstallPrompt />
+                            <WalletNetworkWarning />
+                            <Navigation />
+                            <ScrollRestorer />
+                            <main
+                              id="main-content"
+                              tabIndex={-1}
+                              className="mx-auto w-full max-w-5xl flex-1 px-3 py-6 sm:px-4 sm:py-8 lg:ml-[220px]"
+                            >
+                              <ErrorBoundary>{children}</ErrorBoundary>
+                            </main>
+                            <footer className="mt-auto border-t border-slate-200 bg-white py-8 dark:border-slate-800 dark:bg-slate-900">
+                              <div className="mx-auto max-w-5xl px-4">
+                                <div className="flex flex-col items-center justify-between gap-6 md:flex-row">
+                                  <div className="flex flex-col items-center gap-2 md:items-start">
+                                    <span className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                                      StellarWork
+                                    </span>
+                                    <p className="text-sm text-slate-500 dark:text-slate-400">
+                                      Decentralized Escrow Marketplace
+                                    </p>
+                                  </div>
 
-                <nav className="flex flex-wrap justify-center gap-8 text-sm font-medium text-slate-600 dark:text-slate-400">
-                  <a href="https://github.com/anumukul/Stellar-work-" target="_blank" rel="noopener noreferrer" className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors">GitHub</a>
-                  <Link href="/docs" className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors">Documentation</Link>
-                  <a href="/LICENSE" target="_blank" rel="noopener noreferrer" className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors">License</a>
-                </nav>
+                                  <nav className="flex flex-wrap justify-center gap-8 text-sm font-medium text-slate-600 dark:text-slate-400">
+                                    <a
+                                      href="https://github.com/anumukul/Stellar-work-"
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="transition-colors hover:text-blue-600 dark:hover:text-blue-400"
+                                    >
+                                      {footer("github")}
+                                    </a>
+                                    <Link
+                                      href="/docs"
+                                      className="transition-colors hover:text-blue-600 dark:hover:text-blue-400"
+                                    >
+                                      {footer("documentation")}
+                                    </Link>
+                                    <a
+                                      href="/LICENSE"
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="transition-colors hover:text-blue-600 dark:hover:text-blue-400"
+                                    >
+                                      {footer("license")}
+                                    </a>
+                                    <Link
+                                      href="/legal/terms"
+                                      className="transition-colors hover:text-blue-600 dark:hover:text-blue-400"
+                                    >
+                                      {footer("terms")}
+                                    </Link>
+                                    <Link
+                                      href="/legal/privacy"
+                                      className="transition-colors hover:text-blue-600 dark:hover:text-blue-400"
+                                    >
+                                      {footer("privacy")}
+                                    </Link>
+                                  </nav>
 
-                <div className="flex items-center gap-2 rounded-full bg-slate-50 px-4 py-2 border border-slate-100 dark:bg-slate-800 dark:border-slate-700">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Built on</span>
-                  <span className="text-sm font-bold text-slate-800 dark:text-slate-200">Stellar</span>
-                </div>
-              </div>
-              <div className="mt-8 border-t border-slate-100 pt-8 text-center text-xs text-slate-400 dark:border-slate-800 dark:text-slate-500">
-                &copy; {new Date().getFullYear()} StellarWork. All rights reserved.
-              </div>
-            </div>
-          </footer>
-          </ToastProvider>
-          </MessagingProvider>
-          </NotificationProvider>
-        </WalletProvider>
-        </ThemeProvider>
+                                  <div className="flex items-center gap-2 rounded-full border border-slate-100 bg-slate-50 px-4 py-2 dark:border-slate-800 dark:bg-slate-800">
+                                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                                      {common("builtOn")}
+                                    </span>
+                                    <span className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                                      Stellar
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="mt-8 border-t border-slate-100 pt-8 text-center text-xs text-slate-400 dark:border-slate-800">
+                                  &copy; {new Date().getFullYear()} {common("allRightsReserved")}
+                                </div>
+                              </div>
+                            </footer>
+                            <AppFooter messages={footerMessages} />
+                          </ClientProviders>
+                        </ToastProvider>
+                      </MeetingsProvider>
+                    </MessagingProvider>
+                  </NotificationProvider>
+                </WalletProvider>
+              </NetworkProvider>
+            </TypographyProvider>
+          </ThemeProvider>
         </NextIntlClientProvider>
       </body>
     </html>

@@ -5,12 +5,15 @@ import { useModalFocusTrap } from "@/lib/modal";
 import { useWallet } from "@/lib/wallet-context";
 import { useToast } from "@/components/ToastProvider";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import ContractRetryBanner from "@/components/ContractRetryBanner";
 import EmptyState from "@/components/EmptyState";
 import NoResultsState from "@/components/NoResultsState";
 import SectionCard from "@/components/SectionCard";
+import Spinner from "@/components/Spinner";
 import { toXlm } from "@/lib/format";
 import { isConfirmSuppressed, CONFIRM_KEYS } from "@/lib/confirm-prefs";
 import { raiseDispute as contractRaiseDispute, resolveDispute as contractResolveDispute } from "@/lib/contract";
+import { retryQueuedWrites } from "@/lib/stellar";
 import {
   loadDisputesPageData,
   splitByBps,
@@ -18,17 +21,23 @@ import {
   type DisputeStatus,
   type EligibleJob,
 } from "@/lib/disputes-loader";
+import {
+  sanitizePlainText,
+  MAX_DISPUTE_REASON_LEN,
+  MAX_DISPUTE_EVIDENCE_LEN,
+  MAX_RESOLUTION_NOTE_LEN,
+} from "@/lib/sanitize";
 
 type Role = "client" | "freelancer" | "admin";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const STATUS_META: Record<DisputeStatus, { label: string; color: string; dot: string }> = {
-  Active: { label: "Active", color: "text-amber-600 bg-amber-50 ring-amber-200", dot: "bg-amber-500" },
+  Active: { label: "Active", color: "text-amber-800 bg-amber-50 ring-amber-300", dot: "bg-amber-600" },
   PendingEvidence: { label: "Evidence Needed", color: "text-blue-600 bg-blue-50 ring-blue-200", dot: "bg-blue-500" },
   UnderReview: { label: "Under Review", color: "text-violet-600 bg-violet-50 ring-violet-200", dot: "bg-violet-500" },
-  Resolved: { label: "Resolved", color: "text-emerald-600 bg-emerald-50 ring-emerald-200", dot: "bg-emerald-500" },
-  Closed: { label: "Closed", color: "text-slate-500 bg-slate-100 ring-slate-200", dot: "bg-slate-400" },
+  Resolved: { label: "Resolved", color: "text-emerald-800 bg-emerald-50 ring-emerald-300", dot: "bg-emerald-600" },
+  Closed: { label: "Closed", color: "text-slate-700 bg-slate-100 ring-slate-300", dot: "bg-slate-500" },
 };
 
 function fmtDate(iso: string) {
@@ -51,14 +60,10 @@ function StatusBadge({ status }: { status: DisputeStatus }) {
   );
 }
 
-function Spinner() {
+function DisputesLoading() {
   return (
-    <div
-      role="status"
-      aria-label="Loading disputes"
-      className="flex items-center justify-center py-16"
-    >
-      <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-200 border-t-slate-700" />
+    <div className="flex items-center justify-center py-16">
+      <Spinner size="lg" color="#334155" label="Loading disputes" />
     </div>
   );
 }
@@ -89,11 +94,13 @@ function RaiseDisputeModal({
 
   async function handleSubmit() {
     if (loading) return;
-    if (!reason.trim()) { setError("Please describe the dispute reason."); return; }
+    const cleanReason = sanitizePlainText(reason, MAX_DISPUTE_REASON_LEN);
+    const cleanEvidence = sanitizePlainText(evidence, MAX_DISPUTE_EVIDENCE_LEN);
+    if (!cleanReason) { setError("Please describe the dispute reason."); return; }
     setError("");
     setLoading(true);
     try {
-      await onSubmit(jobId, reason, evidence);
+      await onSubmit(jobId, cleanReason, cleanEvidence);
       onClose();
     } catch {
       setError("Failed to raise dispute. Please try again.");
@@ -108,13 +115,14 @@ function RaiseDisputeModal({
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
+        aria-labelledby="raise-dispute-title"
         tabIndex={-1}
         className="w-full max-w-lg rounded-2xl bg-white shadow-2xl ring-1 ring-black/5 overflow-hidden"
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
           <div>
-            <h2 className="text-base font-semibold text-slate-900">Raise a Dispute</h2>
+            <h2 id="raise-dispute-title" className="text-base font-semibold text-slate-900">Raise a Dispute</h2>
             <p className="text-xs text-slate-500 mt-0.5">Funds will be held in escrow until resolved</p>
           </div>
           <button
@@ -139,8 +147,9 @@ function RaiseDisputeModal({
           <div className="px-6 py-5 space-y-4">
           {/* Job selector */}
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1.5">Job</label>
+            <label htmlFor="dispute-job" className="block text-xs font-medium text-slate-700 mb-1.5">Job</label>
             <select
+              id="dispute-job"
               value={jobId}
               onChange={e => setJobId(e.target.value)}
               className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
@@ -153,8 +162,9 @@ function RaiseDisputeModal({
 
           {/* Reason */}
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1.5">Reason <span className="text-red-500">*</span></label>
+            <label htmlFor="dispute-reason" className="block text-xs font-medium text-slate-700 mb-1.5">Reason <span className="text-red-500">*</span></label>
             <textarea
+              id="dispute-reason"
               value={reason}
               onChange={e => setReason(e.target.value)}
               rows={3}
@@ -166,8 +176,9 @@ function RaiseDisputeModal({
 
           {/* Evidence */}
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1.5">Supporting Evidence <span className="text-slate-400">(optional)</span></label>
+            <label htmlFor="dispute-evidence" className="block text-xs font-medium text-slate-700 mb-1.5">Supporting Evidence <span className="text-slate-400">(optional)</span></label>
             <textarea
+              id="dispute-evidence"
               value={evidence}
               onChange={e => setEvidence(e.target.value)}
               rows={2}
@@ -177,7 +188,7 @@ function RaiseDisputeModal({
           </div>
 
           {error && (
-            <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 ring-1 ring-red-200">{error}</p>
+            <p role="alert" aria-live="assertive" className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 ring-1 ring-red-200">{error}</p>
           )}
           </div>
 
@@ -195,7 +206,7 @@ function RaiseDisputeModal({
               disabled={loading}
               className="flex items-center gap-2 rounded-lg bg-slate-900 px-5 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60 transition-colors"
             >
-              {loading && <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />}
+              {loading && <Spinner size={14} color="currentColor" label="Submitting dispute" />}
               Submit Dispute
             </button>
           </div>
@@ -232,11 +243,12 @@ function ResolveModal({
 
   async function handleResolve() {
     if (loading) return;
-    if (!note.trim()) { setError("Resolution note is required."); return; }
+    const cleanNote = sanitizePlainText(note, MAX_RESOLUTION_NOTE_LEN);
+    if (!cleanNote) { setError("Resolution note is required."); return; }
     setError("");
     setLoading(true);
     try {
-      await onResolve(dispute.id, clientShare, note);
+      await onResolve(dispute.id, clientShare, cleanNote);
       onClose();
     } catch {
       setError("Failed to resolve dispute. Please try again.");
@@ -359,7 +371,7 @@ function ResolveModal({
               disabled={loading}
               className="flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60 transition-colors"
             >
-              {loading && <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />}
+              {loading && <Spinner size={14} color="currentColor" label="Resolving dispute" />}
               Confirm Resolution
             </button>
           </div>
@@ -394,7 +406,7 @@ function DisputeCard({
             <span className="text-xs text-slate-400">·</span>
             <span className="text-xs text-slate-500">Raised by {dispute.raisedBy}</span>
           </div>
-          <h3 className="text-sm font-semibold text-slate-900 truncate">{dispute.jobTitle}</h3>
+          <h2 className="text-sm font-semibold text-slate-900 truncate">{dispute.jobTitle}</h2>
           <div className="flex items-center gap-3 mt-1.5">
             <span className="text-xs text-slate-500">{dispute.client} <span className="text-slate-300">vs</span> {dispute.freelancer}</span>
           </div>
@@ -534,6 +546,8 @@ export default function DisputesPage() {
     try {
       await contractRaiseDispute(wallet, jobId);
       const job = eligibleJobs.find(j => j.id === jobId)!;
+      const cleanReason = sanitizePlainText(reason, MAX_DISPUTE_REASON_LEN);
+      const cleanEvidence = sanitizePlainText(evidence, MAX_DISPUTE_EVIDENCE_LEN);
       const newDispute: Dispute = {
         id: `D-${String(disputes.length + 1).padStart(3, "0")}`,
         jobId,
@@ -544,8 +558,8 @@ export default function DisputesPage() {
         raisedBy: role as "client" | "freelancer",
         raisedAt: new Date().toISOString(),
         status: "Active",
-        reason,
-        evidence,
+        reason: cleanReason,
+        evidence: cleanEvidence,
       };
       setDisputes(prev => [newDispute, ...prev]);
       showSuccess("Dispute raised. Funds held in escrow.");
@@ -559,6 +573,7 @@ export default function DisputesPage() {
       const jobId = disputes.find(d => d.id === id)?.jobId;
       if (!jobId) return;
       await contractResolveDispute(jobId, clientShare);
+      const cleanNote = sanitizePlainText(note, MAX_RESOLUTION_NOTE_LEN);
       setDisputes(prev =>
         prev.map(d =>
           d.id === id
@@ -569,7 +584,7 @@ export default function DisputesPage() {
                   resolvedAt: new Date().toISOString(),
                   clientShare,
                   freelancerShare: 100 - clientShare,
-                  note,
+                  note: cleanNote,
                 },
               }
             : d
@@ -651,6 +666,18 @@ export default function DisputesPage() {
           </div>
         </div>
 
+        <ContractRetryBanner
+          onRetryQueue={async () => {
+            const { succeeded, failed } = await retryQueuedWrites();
+            if (succeeded > 0) {
+              showSuccess(`Retried ${succeeded} queued write${succeeded === 1 ? "" : "s"}.`);
+            }
+            if (failed > 0) {
+              showError(`${failed} queued write${failed === 1 ? "" : "s"} still failed.`);
+            }
+          }}
+        />
+
         {/* Filter tabs */}
         <div className="mb-5 flex gap-1 rounded-xl border border-slate-200 bg-white p-1 w-fit">
           {(["all", "active", "resolved"] as const).map(f => (
@@ -678,7 +705,7 @@ export default function DisputesPage() {
 
         {/* Content */}
         {loading ? (
-          <Spinner />
+          <DisputesLoading />
         ) : error ? (
           <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}{" "}

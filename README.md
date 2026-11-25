@@ -2,8 +2,11 @@
 
 [![Production Deployment](https://img.shields.io/github/actions/workflow/status/your-org/Stellar-work-/deploy-production.yml?branch=main&label=production&logo=vercel)](https://github.com/your-org/Stellar-work-/actions/workflows/deploy-production.yml)
 [![Preview Deployments](https://img.shields.io/github/actions/workflow/status/your-org/Stellar-work-/deploy-preview.yml?label=preview&logo=vercel)](https://github.com/your-org/Stellar-work-/actions/workflows/deploy-preview.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/your-org/Stellar-work-/ci.yml?label=ci&logo=github)](https://github.com/your-org/Stellar-work-/actions/workflows/ci.yml)
 [![Frontend CI](https://img.shields.io/github/actions/workflow/status/your-org/Stellar-work-/frontend.yml?label=frontend+ci&logo=github)](https://github.com/your-org/Stellar-work-/actions/workflows/frontend.yml)
 [![Contract CI](https://img.shields.io/github/actions/workflow/status/your-org/Stellar-work-/contract.yml?label=contract+ci&logo=rust)](https://github.com/your-org/Stellar-work-/actions/workflows/contract.yml)
+[![Lighthouse](https://img.shields.io/badge/performance-≥90-brightgreen?logo=lighthouse&label=lighthouse)](https://github.com/your-org/Stellar-work-/actions/workflows/lighthouse.yml)
+[![Code Coverage](https://img.shields.io/codecov/c/github/your-org/Stellar-work-?logo=codecov)](https://codecov.io/gh/your-org/Stellar-work-)
 
 StellarWork is an open-source decentralized freelance marketplace on Stellar. Payments are held in Soroban escrow and released by state transitions, not platform custody logic.
 
@@ -12,41 +15,88 @@ StellarWork is an open-source decentralized freelance marketplace on Stellar. Pa
 ```
 stellarwork
 ├── contracts/escrow
+├── contracts/retainer
 ├── frontend
 └── docs
 ```
 
-## Local Setup
+## Local DevNet (Isolated Testing)
 
-### Using Docker (Recommended)
-
-You can spin up the full development environment with a single command (requires Docker installed):
+For fully isolated contract testing without relying on public testnets, use the devnet scripts:
 
 ```bash
-cp frontend/.env.example frontend/.env.local
-docker compose up -d
+# 1. Set up a local Soroban devnet (requires Docker)
+./scripts/setup-devnet.sh
+
+# 2. Reset the devnet state when needed
+./scripts/reset-devnet.sh
+
+# 3. Run tests against the local devnet
+./scripts/run-tests-local.sh
+```
+
+The setup script:
+- Starts a Stellar Quickstart container with a standalone network
+- Funds a test admin account
+- Deploys and initializes the escrow contract
+- Saves configuration to `.env.dev`
+
+## Local Setup
+
+### Using Docker Compose (Recommended) ⭐
+
+Spin up the complete development environment with one command:
+
+```bash
+docker compose up
 ```
 
 This starts:
-- **frontend** — Next.js dev server at [http://localhost:3000](http://localhost:3000) with hot-reload
-- **contract-builder** — Rust + Soroban CLI environment for building/testing contracts
-- **stellar-quickstart** — Local Stellar dev network with Soroban RPC at [http://localhost:8000](http://localhost:8000)
+- **stellar** — Local Stellar testnet with Soroban RPC at [http://localhost:8000](http://localhost:8000)
+- **frontend** — Next.js dev server at [http://localhost:3000](http://localhost:3000) with hot-reload (files are live-synced)
+- **contract-builder** — Rust + Soroban CLI environment for building/testing contracts.
 
-File changes in `frontend/` will trigger hot-reload inside the container automatically.
+**First run?** The Stellar testnet takes 20–30 seconds to initialize. Once ready, the frontend automatically connects to it via the Docker internal network.
 
-To run contract tests inside the container:
+#### Common Docker Compose Tasks
 
 ```bash
+# View service status
+docker compose ps
+
+# View logs (all services or specific service)
+docker compose logs
+docker compose logs stellar
+docker compose logs frontend
+
+# Build and deploy contracts
+docker compose exec contract-builder bash -c "cd contracts/escrow && soroban contract build"
+
+# Run contract tests
 docker compose exec contract-builder cargo test --manifest-path contracts/escrow/Cargo.toml
+
+# Run frontend tests
+docker compose exec frontend npm run test
+
+# Stop services (preserve state)
+docker compose down
+
+# Stop and remove volumes (fresh start next time)
+docker compose down -v
 ```
 
-Common commands are also available via Makefile:
+For detailed setup/troubleshooting/advanced configuration, see [Docker Compose Setup Guide](docs/DOCKER_COMPOSE_SETUP.md).
+
+#### Quick Makefile Commands
+
+Common Docker Compose operations are available via Makefile:
 
 ```bash
-make up      # Start all services
-make down    # Stop all services
-make test-contract  # Run contract unit tests
-make test-frontend  # Run frontend unit tests
+make up      # docker compose up
+make down    # docker compose down
+make logs    # docker compose logs -f
+make test-contract   # docker compose exec contract-builder cargo test
+make test-frontend   # docker compose exec frontend npm run test
 ```
 
 ### Manual Setup
@@ -210,8 +260,10 @@ Copy `frontend/.env.example` to `frontend/.env.local` and set the required varia
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `NEXT_PUBLIC_CONTRACT_ID` | Yes | — | Deployed escrow contract ID |
-| `NEXT_PUBLIC_NETWORK` | No | `testnet` | `testnet` or `mainnet` |
+| `NEXT_PUBLIC_NETWORK` | No | `testnet` | `testnet`, `futurenet`, or `mainnet` |
 | `NEXT_PUBLIC_SOROBAN_RPC` | No | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint |
+| `NEXT_PUBLIC_CONTRACT_ID_TESTNET` | No | — | Per-network contract ID; takes precedence over `NEXT_PUBLIC_CONTRACT_ID` |
+| `NEXT_PUBLIC_SOROBAN_RPC_FUTURENET` | No | `https://rpc-futurenet.stellar.org` | Soroban RPC endpoint for futurenet |
 | `NEXT_PUBLIC_NATIVE_TOKEN` | No | — | Default token address for post-job form |
 | `NEXT_PUBLIC_ADMIN_ADDRESS` | No | — | Admin wallet for UI access control |
 | `NEXT_PUBLIC_IPFS_GATEWAY_URL` | No | `https://dweb.link/ipfs/` | IPFS gateway for descriptions |
@@ -226,15 +278,28 @@ The frontend is deployed to Vercel automatically:
 - **Production** — every push to `main` that changes `frontend/**` triggers a production deployment.
 - **Preview** — every pull request gets a unique preview URL, posted as a comment by the GitHub Actions bot.
 
-See [docs/DEPLOY.md](docs/DEPLOY.md) for the full setup guide (creating the Vercel project, required GitHub secrets, environment variable configuration, and troubleshooting).
+See [docs/DEPLOY.md](docs/DEPLOY.md) for the Vercel CI/CD setup guide (creating the Vercel project, required GitHub secrets, environment variable configuration, and troubleshooting).
 
+For hosting the frontend on Vercel, Netlify, or Docker (plus production env configuration), see [docs/FRONTEND_DEPLOYMENT.md](docs/FRONTEND_DEPLOYMENT.md).
 For a command-only deployment reference, see `docs/testnet-deployment-guide.md`.
 For environment configuration, see `docs/environments.md`.
 For API reference, see `docs/CONTRACT.md`.
+For retainer contract reference, see `docs/retainer-reference.md`.
 For frontend architecture, see `docs/FRONTEND_ARCHITECTURE.md`.
 For third-party integration, see `docs/INTEGRATION.md`.
 
 For the full documentation index, see [docs/README.md](docs/README.md).
+
+## Translation Status
+
+StellarWork supports multiple languages. Community contributions to add or maintain translations are welcome — see [docs/TRANSLATING.md](docs/TRANSLATING.md) for a step-by-step guide.
+
+| Locale | Language | Status | Maintainer |
+|--------|----------|--------|------------|
+| `en` | English | ✅ Complete (reference) | Core team |
+| `es` | Spanish | ✅ Complete | Community |
+
+To add a new language, follow the [translation guide](docs/TRANSLATING.md).
 
 ## Production Operations
 
@@ -261,6 +326,11 @@ Step-by-step video walkthroughs for the most common workflows. Videos are record
 > When videos are published, replace "Planned" with a link to the video (e.g., `[Watch →](https://youtube.com/...)`).
 
 For recording setup, script templates, format guidelines, and closed captioning standards, see [docs/VIDEO_TUTORIALS.md](docs/VIDEO_TUTORIALS.md).
+
+## Code of Conduct
+
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+All contributors are expected to uphold our community standards.
 
 ## License
 

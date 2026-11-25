@@ -1,26 +1,176 @@
 # Contributing to StellarWork
 
-Thanks for contributing.
+Thanks for contributing! Please take a moment to review this guide before
+submitting changes. All contributors are expected to follow our
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 New contributors: start with the [onboarding checklist](docs/contributor-onboarding-checklist.md) and the [docs index](docs/README.md).
 
+## Development Setup
+
+### Prerequisites
+
+- **Node.js** 18+ and **npm** 9+
+- **Rust** stable toolchain (for contract development)
+- **Soroban CLI** (for contract builds and deploys)
+- **Docker** (optional, for local Stellar network)
+
+### Clone and Install
+
+```bash
+git clone https://github.com/<your-org>/Stellar-work-.git
+cd Stellar-work-
+```
+
+**Frontend only:**
+
+```bash
+cd frontend
+cp .env.example .env.local
+npm install
+npm run dev
+```
+
+**Full stack with Docker:**
+
+```bash
+cp frontend/.env.example frontend/.env.local
+docker compose up -d
+```
+
+This starts the frontend (port 3000), a contract builder, and a local Stellar
+dev network with Soroban RPC (port 8000).
+
+### Run Checks Locally
+
+```bash
+make test-contract      # cargo test in contracts/escrow
+make test-frontend      # vitest unit tests
+make lint-frontend      # ESLint
+make typecheck          # TypeScript type checking
+```
+
 ## Branching
 
-- Fork and create branches as `feature/<issue-number>-<short-description>`.
+- Fork the repository and create branches from `main`.
+- Use the naming convention: `<type>/<issue-number>-<short-description>`
 
-## Development Rules
+| Type | Usage |
+|------|-------|
+| `feature/` | New features and enhancements |
+| `fix/` | Bug fixes |
+| `docs/` | Documentation changes |
+| `chore/` | Maintenance, dependency updates, refactoring |
+| `ci/` | CI/CD pipeline changes |
 
-- Contract changes must include or update unit tests.
-- Frontend PRs must not break existing pages.
-- Use Tailwind utilities only. Do not introduce external UI component libraries.
-- Keep scope focused on the linked issue.
+Examples: `feature/42-add-dark-mode`, `fix/17-wallet-connection`, `docs/8-api-reference`
 
-## Before Opening a PR
+## Commit Message Format
+
+We follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<scope>): <description>
+
+[optional body]
+
+[optional footer]
+```
+
+**Types**: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`, `style`, `perf`
+
+**Scopes**: `contract`, `frontend`, `docs`, `ci`, `scripts`
+
+Examples:
+```
+feat(frontend): add network switcher dropdown
+fix(contract): handle zero-amount post_job edge case
+docs(readme): add deployment walkthrough
+chore(deps): bump @stellar/stellar-sdk to 15.0.1
+```
+
+## Coding Standards
 
 - Run `soroban contract build` in `contracts/escrow`.
 - Run `cargo test` in `contracts/escrow`.
 - Run `cargo fmt --all -- --check` in `contracts/escrow` to verify formatting.
+- Run `make coverage-contract` to verify test coverage meets the 80% threshold.
 - Run frontend checks for changed frontend files.
+
+### Style Guide
+
+All code style conventions are documented in the [Style Guide](docs/STYLE_GUIDE.md). This covers:
+- TypeScript and Rust style conventions
+- Comment and docstring formats
+- Naming conventions for components, functions, and types
+- Commit message guidelines
+- Links to automated linting configuration
+
+### Rust (Contract)
+
+- Follow `rustfmt` formatting: `cargo fmt --all -- --check`
+- Run `cargo clippy` and address warnings (zero warnings enforced)
+- All public contract functions must have unit tests
+- Use `proptest` for property-based testing of state machines
+- Follow naming conventions: `PascalCase` for types, `snake_case` for functions/variables, `SCREAMING_SNAKE_CASE` for constants
+
+### TypeScript / React (Frontend)
+
+- Follow ESLint configuration in `frontend/eslint.config.mjs`
+- Use Prettier formatting (enforced via ESLint)
+- Use `"use client"` directive at the top of client component files
+- Use Tailwind CSS utilities for all styling — no external UI libraries
+- Prefer `React.memo` for pure presentational components
+- Use dynamic imports for large or rarely-used components
+- All new features must include unit tests in `frontend/__tests__/`
+- Follow naming conventions: `PascalCase` for components/types, `camelCase` for functions/variables
+
+## Security Guidelines
+
+### Content Security Policy (CSP)
+
+- The frontend application enforces strict Content Security Policy headers defined in `frontend/next.config.ts`.
+- `default-src 'self'`, restricting script/style sources and limiting network connections to verified Stellar RPC endpoints and IPFS gateways.
+- To enable report-only mode during testing or staging, set `CSP_REPORT_ONLY=true` in your environment.
+
+### Secret Scanning & Credential Protection
+
+- Secret scanning with **Gitleaks** is enforced in CI (`.github/workflows/ci.yml`).
+- Never commit private keys, API tokens, secret keys (`S...`), or credentials to git.
+- Run `gitleaks detect` locally before pushing code changes to ensure no sensitive credentials or keys are committed.
+
+## Development Rules
+
+- Contract changes must include or update unit tests and test snapshots.
+- Frontend PRs must not break existing pages or introduce TypeScript errors.
+- Use Tailwind utilities only. Do not introduce external UI component libraries.
+- Keep scope focused on the linked issue — avoid unrelated changes.
+- Run `npm run typecheck` before pushing frontend changes.
+
+## Contract Code Coverage
+
+To maintain high code quality, we track test coverage for our Soroban smart contracts. We require a minimum of **80% code coverage** for all Rust contract code.
+
+### Running Coverage Locally
+
+You can generate code coverage reports locally using `cargo-tarpaulin`.
+
+1. Ensure you have `cargo-tarpaulin` installed:
+   ```bash
+   cargo install cargo-tarpaulin
+   ```
+2. Run the coverage script using the Makefile:
+   ```bash
+   make coverage-contract
+   ```
+   Or run the script directly:
+   ```bash
+   ./contracts/coverage.sh
+   ```
+
+This will run the test suite, analyze the coverage, and generate:
+- An interactive HTML report at `coverage/tarpaulin-report.html` (open this in your browser to inspect line-by-line coverage).
+- An LCOV report at `coverage/lcov.info` (used for CI integration).
 
 ## Pre-commit Hooks (Optional)
 
@@ -56,12 +206,130 @@ The following checks are performed:
   pre-commit uninstall
   ```
 
-## Pull Request Requirements
+## Architecture Decision Records (ADRs)
 
-- Reference the issue number in the PR description.
-- Include a brief explanation of design choices and trade-offs.
-- Include screenshots or short clips for UI changes.
-- Maintainer review is required before merge.
+When making significant architectural changes, please submit an ADR in the `docs/adr/` directory.
+
+### ADR Creation Checklist
+- [ ] Use the standard template format.
+- [ ] Title, Status, and Date are clearly stated.
+- [ ] Context explains the motivating issue.
+- [ ] Decision details the proposed change.
+- [ ] Consequences list what becomes easier or harder.
+- [ ] Linked from relevant code comments if applicable.
+
+## Accessibility
+
+The interface targets WCAG 2.1 Level AA. Current conformance, the features
+already implemented, and the known gaps are recorded in the
+[Accessibility Conformance Report](docs/accessibility-conformance.md).
+
+Before opening a PR that touches the interface, run the reviewer checklist in
+that report — it is a short keyboard, semantics and responsive pass that catches
+the regressions cheapest to catch. If you close one of the listed gaps, move it
+out of the gaps table in the same PR.
+
+## Pull Request Process
+
+1. **Open an issue** (if one doesn't exist) describing the bug or feature.
+2. **Create a branch** from `main` following the naming convention above.
+3. **Implement your changes**, writing tests and updating docs as needed.
+4. **Run all checks locally**:
+   - Contract: `cargo test && cargo fmt --all -- --check && cargo clippy`
+   - Frontend: `npm run lint && npm run typecheck && npm test`
+5. **Push your branch** and open a pull request against `main`.
+6. **Fill out the PR template** — reference the issue, explain design choices,
+   and include screenshots or short clips for UI changes.
+7. **Request review** from a maintainer. All PRs require at least one approving
+   review before merge.
+8. **Address review feedback** by pushing additional commits or amending.
+
+### PR Title Format
+
+PR titles should follow the same conventional commit format:
+
+```
+feat(frontend): add network switcher dropdown
+fix(contract): handle zero-amount post_job edge case
+```
+
+See [PR title conventions](docs/pr-title-conventions.md) for details.
+
+### Test Requirements
+
+- **New contract functions**: must have unit tests covering happy path and error
+  conditions. Update test snapshots if needed.
+- **New frontend features**: must have at least one unit test covering the core
+  behavior. Complex UI components should include Storybook stories.
+- **Bug fixes**: must include a regression test preventing the bug from
+  recurring.
+- **Refactors**: existing tests must continue to pass. Update tests if behavior
+  changes.
+
+## Feature Flags
+
+StellarWork uses a feature flag system (`frontend/lib/feature-flags.ts`) to enable gradual rollouts, A/B testing, and emergency feature disabling without deployments.
+
+### Available Flags
+
+| Flag | Description |
+|------|-------------|
+| `newDashboard` | New analytics dashboard layout |
+| `newMessaging` | Redesigned messaging interface |
+| `biddingSystem` | Freelancer bidding system for jobs |
+| `milestones` | Milestone-based payment releases |
+| `multiToken` | Support for multiple token types |
+
+### Using Flags in Code
+
+```typescript
+import { isEnabled } from "@/lib/feature-flags";
+
+if (isEnabled("newMessaging")) {
+  // render new messaging UI
+}
+```
+
+### Evaluation Order
+
+Flags are evaluated in this priority order (highest first):
+
+1. **URL parameters**: `?feature.newMessaging=true`
+2. **Environment variables**: `NEXT_PUBLIC_FF_NEWMESSAGING=true`
+3. **localStorage overrides**: Set via the admin panel
+4. **Default value**: Defined in `FLAG_DEFINITIONS`
+
+### Admin Panel
+
+Admins can toggle flags from the admin panel. Overrides are persisted in `localStorage` under the key `stellarwork:feature-flags`.
+
+### Adding a New Flag
+
+1. Add the flag to `FLAG_DEFINITIONS` in `frontend/lib/feature-flags.ts` with a default value and description.
+2. Use `isEnabled('yourFlag')` in components.
+3. Write tests covering both enabled and disabled states.
+4. Document the flag in the table above.
+
+### Development Helpers
+
+- Use `logActiveFlags()` to print all active flags to the console for debugging.
+- Use `getActiveFlags()` to inspect the current state of all flags programmatically.
+- Use URL overrides (`?feature.flagName=true`) to test flags without changing localStorage.
+
+## Getting Help
+
+- **GitHub Issues**: Search existing issues or open a new one.
+- **GitHub Discussions**: For questions, ideas, or general conversation.
+- **Discord**: Join the Stellar Developer Discord for real-time help.
+
+Stuck on your first contribution? Look for issues labeled `good first issue` —
+they're curated for newcomers and have additional context in the comments.
+
+## Contributor Recognition
+
+All contributors are listed in our [README](README.md) and release notes.
+We value every contribution — from fixing a typo to shipping a major feature.
+First-time contributors get a special shoutout in the monthly community update.
 
 ## Issue Labels
 

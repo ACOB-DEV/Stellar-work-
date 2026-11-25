@@ -23,6 +23,11 @@ vi.mock("@/lib/contract", () => ({
   freelancerCancelJob: vi.fn(),
   getDescriptionCid: vi.fn(),
   storeDescriptionCid: vi.fn(),
+  getJobViews: vi.fn().mockResolvedValue(0),
+  recordJobView: vi.fn().mockResolvedValue(undefined),
+  rateJob: vi.fn(),
+  topUpEscrow: vi.fn(),
+  getJobCount: vi.fn().mockResolvedValue(0),
 }));
 
 vi.mock("@/lib/ipfs-service", () => ({
@@ -49,6 +54,19 @@ vi.mock("@/lib/notifications-context", () => ({
   getEventLabel: (event: string) => event,
 }));
 
+vi.mock("@/lib/meetings-context", () => ({
+  useMeetings: () => ({
+    meetings: [],
+    proposeMeeting: vi.fn(),
+    cancelMeeting: vi.fn(),
+    confirmMeeting: vi.fn(),
+    getMeetingsForJob: () => [],
+    getUpcomingMeetings: () => [],
+    getPastMeetings: () => [],
+  }),
+  MeetingsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function makeJob(overrides: Partial<Job> = {}): Job {
@@ -62,6 +80,7 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     deadline: "0",
     token: "GTOKEN",
     revision_count: 0,
+    submitted_at: "0",
     ...overrides,
   };
 }

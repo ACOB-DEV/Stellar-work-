@@ -3,8 +3,12 @@
 import EmptyState from "@/components/EmptyState";
 import ErrorBanner from "@/components/ErrorBanner";
 import NoResultsState from "@/components/NoResultsState";
+import PullToRefresh from "@/components/PullToRefresh";
 import SectionCard from "@/components/SectionCard";
 import TransactionRowSkeleton from "@/components/TransactionRowSkeleton";
+import TruncatedAddress from "@/components/TruncatedAddress";
+import WalletTransactionHistory from "@/components/WalletTransactionHistory";
+import TransactionCSVExport from "@/components/TransactionCSVExport";
 import { getJob, getJobCount } from "@/lib/contract";
 import { useWallet } from "@/lib/wallet-context";
 import {
@@ -51,33 +55,45 @@ function formatDate(ts: number): { date: string; time: string } {
   };
 }
 
-function shortenAddress(address: string | null): string {
-  if (!address) return "—";
-  return `${address.slice(0, 6)}…${address.slice(-4)}`;
+/**
+ * Compute per-token net flows. Fee-breakdown rows (isFeeBreakdown) are
+ * excluded because they are explanatory only — the companion payment_received
+ * row already reflects the net amount (#1326). Amounts from different tokens
+ * are never mixed (#1328).
+ */
+function netFlowByToken(txns: Transaction[]): Record<string, bigint> {
+  const map: Record<string, bigint> = {};
+  for (const tx of txns) {
+    if (tx.isFeeBreakdown) continue;
+    const delta = tx.direction === "incoming" ? tx.amountStroops : -tx.amountStroops;
+    map[tx.token] = (map[tx.token] ?? 0n) + delta;
+  }
+  return map;
+}
+
+function formatNetFlow(net: bigint, token: string): string {
+  const isNeg = net < 0n;
+  const abs = isNeg ? -net : net;
+  const whole = abs / 10_000_000n;
+  const frac = ((abs % 10_000_000n) * 100n) / 10_000_000n;
+  const tokenLabel = token && token !== "native" ? token : "XLM";
+  return `${isNeg ? "−" : "+"}${whole.toString()}.${frac.toString().padStart(2, "0")} ${tokenLabel}`;
 }
 
 function sumXlm(txns: Transaction[]): string {
-  // Sum up incoming flows minus outgoing flows for a net figure.
-  let net = 0n;
-  for (const tx of txns) {
-    if (tx.direction === "incoming") {
-      net += tx.amountStroops;
-    } else {
-      net -= tx.amountStroops;
-    }
-  }
-  const isNeg = net < 0n;
-  const abs = isNeg ? -net : net;
-  // Convert stroops to XLM (7dp, show 2dp)
-  const whole = abs / 10_000_000n;
-  const frac = ((abs % 10_000_000n) * 100n) / 10_000_000n;
-  return `${isNeg ? "−" : "+"}${whole.toString()}.${frac.toString().padStart(2, "0")}`;
+  const byToken = netFlowByToken(txns);
+  const entries = Object.entries(byToken);
+  if (entries.length === 0) return "+0.00 XLM";
+  return entries.map(([token, net]) => formatNetFlow(net, token)).join(" / ");
 }
 
 // ─── Page component ──────────────────────────────────────────────────────────
 
 export default function TransactionsPage() {
   const { wallet, connectWallet } = useWallet();
+
+  // ── ui state ──
+  const [activeTab, setActiveTab] = useState<"platform" | "wallet">("platform");
 
   // ── data ──
   const [allJobs, setAllJobs] = useState<Array<{ id: number; job: Job }>>([]);
@@ -159,8 +175,10 @@ export default function TransactionsPage() {
   // ── announce results to screen readers ───────────────────────────
   useEffect(() => {
     if (loading || !announcerRef.current) return;
-    announcerRef.current.textContent = `${filteredTransactions.length} transaction${filteredTransactions.length !== 1 ? "s" : ""} shown.`;
-  }, [filteredTransactions.length, loading]);
+    if (activeTab === "platform") {
+      announcerRef.current.textContent = `${filteredTransactions.length} transaction${filteredTransactions.length !== 1 ? "s" : ""} shown.`;
+    }
+  }, [filteredTransactions.length, loading, activeTab]);
 
   // ── type filter toggle ────────────────────────────────────────────
   function toggleType(type: TransactionType) {
@@ -204,6 +222,8 @@ export default function TransactionsPage() {
   // ── render ────────────────────────────────────────────────────────
   return (
     <section className="space-y-6">
+      <PullToRefresh onRefresh={fetchJobs} label="Refresh transactions" />
+
       {/* Live region for screen readers */}
       <p
         ref={announcerRef}
@@ -216,14 +236,43 @@ export default function TransactionsPage() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">Transaction History</h1>
-        <button
-          type="button"
-          onClick={() => void fetchJobs()}
-          disabled={loading}
-          className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {loading ? "Refreshing…" : "Refresh"}
-        </button>
+        <div className="flex items-center gap-3">
+          <TransactionCSVExport platformTransactions={allTransactions} wallet={wallet} />
+          <button
+            type="button"
+            onClick={() => void fetchJobs()}
+            disabled={loading}
+            className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="border-b border-slate-200">
+        <nav className="-mb-px flex gap-6" aria-label="Tabs">
+          <button
+            onClick={() => setActiveTab("platform")}
+            className={`whitespace-nowrap border-b-2 px-1 py-4 text-sm font-medium transition-colors ${
+              activeTab === "platform"
+                ? "border-blue-500 text-blue-600"
+                : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700"
+            }`}
+          >
+            Platform Activity
+          </button>
+          <button
+            onClick={() => setActiveTab("wallet")}
+            className={`whitespace-nowrap border-b-2 px-1 py-4 text-sm font-medium transition-colors ${
+              activeTab === "wallet"
+                ? "border-blue-500 text-blue-600"
+                : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700"
+            }`}
+          >
+            On-Chain Wallet Activity
+          </button>
+        </nav>
       </div>
 
       {error && (
@@ -233,6 +282,14 @@ export default function TransactionsPage() {
           onRetry={() => void fetchJobs()}
         />
       )}
+
+      {activeTab === "wallet" ? (
+        <SectionCard>
+          <WalletTransactionHistory wallet={wallet} platformTransactions={allTransactions} />
+        </SectionCard>
+      ) : (
+        <>
+
 
       {/* Summary stats */}
       {!loading && allTransactions.length > 0 && (
@@ -399,6 +456,8 @@ export default function TransactionsPage() {
           </p>
         )}
       </SectionCard>
+      </>
+      )}
     </section>
   );
 }
@@ -475,12 +534,14 @@ function TransactionRow({ tx }: { tx: Transaction }) {
 
       {/* Counterparty */}
       <td className="py-3 pr-4">
-        <span
-          className="font-mono text-xs text-slate-500"
-          title={tx.counterparty ?? undefined}
-        >
-          {shortenAddress(tx.counterparty)}
-        </span>
+        {tx.counterparty ? (
+          <TruncatedAddress
+            address={tx.counterparty}
+            className="font-mono text-xs text-slate-500"
+          />
+        ) : (
+          <span className="font-mono text-xs text-slate-500">—</span>
+        )}
       </td>
 
       {/* Status */}

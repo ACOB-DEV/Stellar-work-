@@ -11,8 +11,9 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 
-type ToastVariant = "success" | "error";
+type ToastVariant = "success" | "error" | "pending";
 
 type ToastItem = {
   id: string;
@@ -23,13 +24,20 @@ type ToastItem = {
 type ToastContextValue = {
   showSuccess: (message: string) => void;
   showError: (message: string) => void;
+  showPending: (message: string) => void;
 };
 
 const ToastContext = createContext<ToastContextValue | null>(null);
 
-const AUTO_DISMISS_MS = 3500;
+const AUTO_DISMISS_MS = 5000;
 
-export function ToastProvider({ children }: { children: ReactNode }) {
+export function ToastProvider({
+  children,
+  messages = { close: "Close", dismissNotification: "Dismiss notification" },
+}: {
+  children: ReactNode;
+  messages?: { close: string; dismissNotification: string };
+}) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const idPrefix = useId();
@@ -81,6 +89,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     () => ({
       showSuccess: (message: string) => push(message, "success"),
       showError: (message: string) => push(message, "error"),
+      showPending: (message: string) => push(message, "pending"),
     }),
     [push],
   );
@@ -97,21 +106,31 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           <div
             key={toast.id}
             role={toast.variant === "error" ? "alert" : "status"}
-            className={`pointer-events-auto flex items-start gap-2 rounded-xl px-4 py-3 text-sm font-medium shadow-lg ring-1 ${
+            className={`pointer-events-auto flex items-start gap-2 rounded-xl px-4 py-3 text-sm font-medium shadow-lg ring-1 toast-enter ${
               toast.variant === "success"
                 ? "bg-emerald-50 text-emerald-800 ring-emerald-200"
-                : "bg-red-50 text-red-800 ring-red-200"
+                : toast.variant === "pending"
+                  ? "bg-blue-50 text-blue-800 ring-blue-200"
+                  : "bg-red-50 text-red-800 ring-red-200"
             }`}
           >
-            <span aria-hidden="true">{toast.variant === "success" ? "✓" : "✕"}</span>
+            <div className="shrink-0 pt-0.5 text-current" aria-hidden="true">
+              {toast.variant === "success" ? (
+                <CheckCircle2 className="h-4 w-4" />
+              ) : toast.variant === "pending" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <XCircle className="h-4 w-4" />
+              )}
+            </div>
             <p className="min-w-0 flex-1">{toast.message}</p>
             <button
               type="button"
               onClick={() => dismiss(toast.id)}
               className="shrink-0 rounded-md px-1.5 py-0.5 text-xs font-semibold hover:bg-black/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
-              aria-label="Dismiss notification"
+              aria-label={messages.dismissNotification}
             >
-              Close
+              {messages.close}
             </button>
           </div>
         ))}
@@ -119,6 +138,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     </ToastContext.Provider>
   );
 }
+
+// ─── useToast ────────────────────────────────────────────────────────────────
 
 export function useToast() {
   const context = useContext(ToastContext);
