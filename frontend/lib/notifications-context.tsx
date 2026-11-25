@@ -38,12 +38,27 @@ const DEFAULT_PREFS: NotificationPreferences = {
 
 const NotificationContext = createContext<NotificationContextValue | null>(null);
 
+function isValidNotification(v: unknown): v is Notification {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const n = v as Record<string, unknown>;
+  return (
+    typeof n.id === "string" &&
+    typeof n.event === "string" &&
+    typeof n.jobId === "number" &&
+    typeof n.message === "string" &&
+    typeof n.timestamp === "number" &&
+    typeof n.seen === "boolean"
+  );
+}
+
 function loadNotifications(): Notification[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
-    return JSON.parse(raw) as Notification[];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isValidNotification);
   } catch {
     return [];
   }

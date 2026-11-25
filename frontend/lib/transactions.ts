@@ -1,7 +1,6 @@
 "use client";
 
 import type { Job } from "@/lib/types";
-import { toXlm } from "@/lib/format";
 
 // ------------------------------------------------------------------
 // Transaction types
@@ -21,7 +20,7 @@ export interface Transaction {
   id: string;
   type: TransactionType;
   direction: TransactionDirection;
-  /** Amount in XLM (human-readable string). */
+  /** Amount formatted for display (includes token symbol). */
   amountXlm: string;
   /** Raw stroops for sorting / math. */
   amountStroops: bigint;
@@ -30,31 +29,41 @@ export interface Transaction {
   counterparty: string | null;
   /**
    * Best-effort timestamp in milliseconds.
-   * For completed/cancelled jobs we use `created_at` (unix seconds) stored on
-   * the contract. For other states we use the same value as a proxy because the
-   * contract does not store separate event timestamps.
+   * Settlement rows use submitted_at (the work-submission time, closest proxy
+   * for when payment cleared). Posting rows use created_at. Null means the
+   * event timestamp is genuinely unknown — callers should not present it as a
+   * confirmed date (#1327).
    */
-  timestamp: number;
+  timestamp: number | null;
   /**
    * Transaction status. We use "confirmed" for terminal job states and
    * "pending" for non-terminal ones.
    */
   status: "confirmed" | "pending";
   token: string;
+  /**
+   * Whether this row is an explanatory fee breakdown rather than an actual
+   * wallet cash movement. These rows must NOT be counted in net-flow totals
+   * because the companion payment_received row already reflects the net amount
+   * after the fee was deducted (#1326).
+   */
+  isFeeBreakdown?: boolean;
 }
 
 // ------------------------------------------------------------------
-// Platform fee rate (2.5% = 250 / 10_000 basis points)
+// Amount display helper
 // ------------------------------------------------------------------
-const FEE_BPS = 250n;
-const BPS_BASE = 10_000n;
 
-function calcFee(amount: bigint): bigint {
-  return (amount * FEE_BPS) / BPS_BASE;
-}
-
-function calcNet(amount: bigint): bigint {
-  return amount - calcFee(amount);
+/**
+ * Format stroops for display. For native XLM (or unknown tokens) use 7dp;
+ * prefix with the token identifier so amounts from different assets are never
+ * confused (#1328).
+ */
+function formatAmount(stroops: bigint, token: string): string {
+  const tokenLabel = token && token !== "native" ? token : "XLM";
+  const whole = stroops / 10_000_000n;
+  const frac = (stroops % 10_000_000n).toString().padStart(7, "0");
+  return `${whole}.${frac} ${tokenLabel}`;
 }
 
 // ------------------------------------------------------------------
@@ -76,10 +85,12 @@ export function deriveTransactions(
   if (!isClient && !isFreelancer) return [];
 
   const raw = BigInt(job.amount);
-  const fee = calcFee(raw);
-  const net = calcNet(raw);
-  const ts = Number(job.created_at) * 1000 || Date.now();
   const token = job.token;
+
+  // Use created_at for the posting row; submitted_at for settlement rows.
+  // Avoid Date.now() — a fabricated timestamp is worse than null (#1327).
+  const postTs = job.created_at ? Number(job.created_at) * 1000 : null;
+  const settlementTs = job.submitted_at ? Number(job.submitted_at) * 1000 : postTs;
 
   const txns: Transaction[] = [];
 
@@ -89,47 +100,41 @@ export function deriveTransactions(
       id: `${jobId}-job_posted`,
       type: "job_posted",
       direction: "outgoing",
-      amountXlm: toXlm(raw),
+      amountXlm: formatAmount(raw, token),
       amountStroops: raw,
       jobId,
       counterparty: null, // funds go into escrow, not to a person
-      timestamp: ts,
+      timestamp: postTs,
       status: "confirmed",
       token,
     });
   }
 
   // ── 2. Payment Received (freelancer perspective) ─────────────────
+  // The contract transfers the gross escrow amount; the actual net the
+  // freelancer receives depends on the fee tier and any discounts that were
+  // active at settlement time — not on a fixed 2.5% constant (#1325). We
+  // display the gross amount and mark net/fee details as unavailable without
+  // on-chain settlement event data.
   if (isFreelancer && job.status === "Completed") {
     txns.push({
       id: `${jobId}-payment_received`,
       type: "payment_received",
       direction: "incoming",
-      amountXlm: toXlm(net),
-      amountStroops: net,
+      amountXlm: formatAmount(raw, token),
+      amountStroops: raw,
       jobId,
       counterparty: job.client,
-      timestamp: ts,
+      timestamp: settlementTs,
       status: "confirmed",
       token,
     });
   }
 
-  // ── 3. Fee Deducted (freelancer perspective on completed jobs) ───
-  if (isFreelancer && job.status === "Completed") {
-    txns.push({
-      id: `${jobId}-fee_deducted`,
-      type: "fee_deducted",
-      direction: "outgoing",
-      amountXlm: toXlm(fee),
-      amountStroops: fee,
-      jobId,
-      counterparty: null, // goes to platform
-      timestamp: ts,
-      status: "confirmed",
-      token,
-    });
-  }
+  // ── 3. Fee Deducted (explanatory breakdown row only) ─────────────
+  // This row is informational. The fee amount is unknown without settlement
+  // event data (#1325). We omit this row to avoid presenting an estimated
+  // fee as confirmed and to prevent double-counting in net-flow sums (#1326).
 
   // ── 4. Refund Received (client gets money back on cancellation) ──
   if (isClient && job.status === "Cancelled") {
@@ -137,11 +142,11 @@ export function deriveTransactions(
       id: `${jobId}-refund_received`,
       type: "refund_received",
       direction: "incoming",
-      amountXlm: toXlm(raw),
+      amountXlm: formatAmount(raw, token),
       amountStroops: raw,
       jobId,
       counterparty: job.freelancer, // may be null if cancelled before accept
-      timestamp: ts,
+      timestamp: settlementTs,
       status: "confirmed",
       token,
     });
@@ -156,11 +161,11 @@ export function deriveTransactions(
         id: `${jobId}-dispute_resolved`,
         type: "dispute_resolved",
         direction: "incoming", // direction is ambiguous; use incoming as neutral
-        amountXlm: toXlm(raw),
+        amountXlm: formatAmount(raw, token),
         amountStroops: raw,
         jobId,
         counterparty: isClient ? job.freelancer : job.client,
-        timestamp: ts,
+        timestamp: settlementTs,
         status: "pending",
         token,
       });
@@ -210,12 +215,24 @@ export function applyFilters(
       return false;
     }
     if (filters.dateFrom) {
-      const from = new Date(filters.dateFrom).setHours(0, 0, 0, 0);
+      // #1329: parse YYYY-MM-DD into local midnight by splitting the components
+      // rather than passing the string to `new Date`, which treats date-only
+      // strings as UTC midnight and therefore falls on the previous local day in
+      // negative UTC offsets (e.g. America/Los_Angeles at UTC−8).
+      const [fy, fm, fd] = filters.dateFrom.split("-").map(Number);
+      const from = new Date(fy, fm - 1, fd, 0, 0, 0, 0).getTime();
       if (tx.timestamp < from) return false;
     }
     if (filters.dateTo) {
-      const to = new Date(filters.dateTo).setHours(23, 59, 59, 999);
+      const [ty, tm, td] = filters.dateTo.split("-").map(Number);
+      const to = new Date(ty, tm - 1, td, 23, 59, 59, 999).getTime();
       if (tx.timestamp > to) return false;
+      const from = new Date(filters.dateFrom).setHours(0, 0, 0, 0);
+      if (tx.timestamp === null || tx.timestamp < from) return false;
+    }
+    if (filters.dateTo) {
+      const to = new Date(filters.dateTo).setHours(23, 59, 59, 999);
+      if (tx.timestamp === null || tx.timestamp > to) return false;
     }
     return true;
   });

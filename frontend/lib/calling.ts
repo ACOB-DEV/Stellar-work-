@@ -16,6 +16,8 @@ export type CallType = "audio" | "video";
 
 export interface CallRecord {
   id: string;
+  /** #1331: ownerAddress scopes the record to the wallet that initiated it. */
+  ownerAddress: string;
   peerAddress: string;
   type: CallType;
   startedAt: number;
@@ -24,7 +26,12 @@ export interface CallRecord {
   status: "ringing" | "connected" | "ended" | "missed";
 }
 
-const CALL_HISTORY_KEY = "sw:call-history";
+// #1331: history key is scoped per-wallet so records from different connected
+// accounts cannot bleed into each other. Legacy records (no ownerAddress) are
+// discarded on first read rather than being shown to the wrong wallet.
+function historyKey(ownerAddress: string): string {
+  return `sw:call-history:${ownerAddress.toLowerCase()}`;
+}
 
 function generateRoomName(addr1: string, addr2: string): string {
   const sorted = [addr1.toLowerCase(), addr2.toLowerCase()].sort();
@@ -71,28 +78,31 @@ export function getDailyUrl(
 
 export function saveCallRecord(record: CallRecord): void {
   try {
-    const history = loadCallHistory();
+    const history = loadCallHistory(record.ownerAddress);
     history.unshift(record);
-    localStorage.setItem(CALL_HISTORY_KEY, JSON.stringify(history.slice(0, 50)));
+    localStorage.setItem(historyKey(record.ownerAddress), JSON.stringify(history.slice(0, 50)));
   } catch {}
 }
 
-export function loadCallHistory(): CallRecord[] {
+export function loadCallHistory(ownerAddress: string): CallRecord[] {
   try {
-    const raw = localStorage.getItem(CALL_HISTORY_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const raw = localStorage.getItem(historyKey(ownerAddress));
+    if (!raw) return [];
+    const parsed: CallRecord[] = JSON.parse(raw);
+    // Discard legacy records that pre-date the ownerAddress field (#1331).
+    return parsed.filter((r) => r.ownerAddress === ownerAddress.toLowerCase());
   } catch {
     return [];
   }
 }
 
-export function updateCallRecord(id: string, updates: Partial<CallRecord>): void {
+export function updateCallRecord(id: string, ownerAddress: string, updates: Partial<CallRecord>): void {
   try {
-    const history = loadCallHistory();
+    const history = loadCallHistory(ownerAddress);
     const idx = history.findIndex((r) => r.id === id);
     if (idx !== -1) {
       history[idx] = { ...history[idx], ...updates };
-      localStorage.setItem(CALL_HISTORY_KEY, JSON.stringify(history.slice(0, 50)));
+      localStorage.setItem(historyKey(ownerAddress), JSON.stringify(history.slice(0, 50)));
     }
   } catch {}
 }

@@ -14,9 +14,19 @@ export type TxOutcome = "success" | "error";
 /** Cap on distinct label combinations per metric, so untrusted labels can't grow memory without bound. */
 const MAX_SERIES_PER_METRIC = 500;
 
-const WEB_VITAL_BUCKETS_MS = [50, 100, 200, 400, 800, 1600, 2500, 4000, 6000, 10000];
+/** Realistic ceiling for finite metric observations to prevent aggregate sum overflow. */
+const MAX_METRIC_VALUE = 1e9;
+
+/** Session inactivity window for concurrent visitor estimation (1 minute). */
+export const SESSION_INACTIVITY_TTL_MS = 60_000;
+
+const WEB_VITAL_BUCKETS_MS = [
+  50, 100, 200, 400, 800, 1600, 2500, 4000, 6000, 10000,
+];
 const CLS_BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1];
-const TX_DURATION_BUCKETS_MS = [250, 500, 1000, 2500, 5000, 10000, 20000, 40000];
+const TX_DURATION_BUCKETS_MS = [
+  250, 500, 1000, 2500, 5000, 10000, 20000, 40000,
+];
 
 type Labels = Record<string, string>;
 
@@ -26,14 +36,23 @@ type CounterMetric = {
   series: Map<string, { labels: Labels; value: number }>;
 };
 
+type GaugeMetric = {
+  kind: "gauge";
+  help: string;
+  series: Map<string, { labels: Labels; value: number }>;
+};
+
 type HistogramMetric = {
   kind: "histogram";
   help: string;
   buckets: number[];
-  series: Map<string, { labels: Labels; counts: number[]; sum: number; count: number }>;
+  series: Map<
+    string,
+    { labels: Labels; counts: number[]; sum: number; count: number }
+  >;
 };
 
-type Metric = CounterMetric | HistogramMetric;
+type Metric = CounterMetric | HistogramMetric | GaugeMetric;
 
 const registry = new Map<string, Metric>();
 
@@ -45,10 +64,32 @@ function counter(name: string, help: string): CounterMetric {
   return metric;
 }
 
-function histogram(name: string, help: string, buckets: number[]): HistogramMetric {
+function gauge(name: string, help: string): GaugeMetric {
+  const existing = registry.get(name);
+  if (existing) return existing as GaugeMetric;
+  const metric: GaugeMetric = { kind: "gauge", help, series: new Map() };
+  registry.set(name, metric);
+  return metric;
+}
+
+function setGauge(metric: GaugeMetric, labels: Labels, value: number) {
+  const key = seriesKey(labels);
+  metric.series.set(key, { labels, value });
+}
+
+function histogram(
+  name: string,
+  help: string,
+  buckets: number[],
+): HistogramMetric {
   const existing = registry.get(name);
   if (existing) return existing as HistogramMetric;
-  const metric: HistogramMetric = { kind: "histogram", help, buckets, series: new Map() };
+  const metric: HistogramMetric = {
+    kind: "histogram",
+    help,
+    buckets,
+    series: new Map(),
+  };
   registry.set(name, metric);
   return metric;
 }
@@ -72,12 +113,28 @@ function incCounter(metric: CounterMetric, labels: Labels, delta = 1) {
 }
 
 function observe(metric: HistogramMetric, labels: Labels, value: number) {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > MAX_METRIC_VALUE
+  ) {
+    return;
+  }
   const key = seriesKey(labels);
   let entry = metric.series.get(key);
   if (!entry) {
     if (metric.series.size >= MAX_SERIES_PER_METRIC) return;
-    entry = { labels, counts: new Array(metric.buckets.length).fill(0), sum: 0, count: 0 };
+    entry = {
+      labels,
+      counts: new Array(metric.buckets.length).fill(0),
+      sum: 0,
+      count: 0,
+    };
     metric.series.set(key, entry);
+  }
+  if (!Number.isFinite(entry.sum + value)) {
+    return;
   }
   entry.sum += value;
   entry.count += 1;
@@ -100,7 +157,10 @@ const layoutShift = histogram(
   CLS_BUCKETS,
 );
 
-const pageViews = counter("stellarwork_page_views_total", "Page views reported by browsers.");
+const pageViews = counter(
+  "stellarwork_page_views_total",
+  "Page views reported by browsers.",
+);
 
 const contractTx = counter(
   "stellarwork_contract_tx_total",
@@ -123,6 +183,11 @@ const clientErrors = counter(
   "Unhandled frontend errors reported by browsers.",
 );
 
+const cspViolations = counter(
+  "stellarwork_csp_violations_total",
+  "Content Security Policy violations reported by browsers.",
+);
+
 const httpRequests = counter(
   "stellarwork_http_requests_total",
   "HTTP requests handled by the Next.js server, by route and status code.",
@@ -141,7 +206,17 @@ const httpErrors = counter(
 
 const activeSessions = counter(
   "stellarwork_active_sessions_total",
-  "Number of beacon requests received (proxy for concurrent visitors).",
+  "Lifetime beacon requests received (proxy for session ping activity).",
+);
+
+const sessionPingsTotal = counter(
+  "stellarwork_session_pings_total",
+  "Total number of session beacon pings received.",
+);
+
+const activeSessionsGauge = gauge(
+  "stellarwork_active_sessions",
+  "Estimated concurrent active visitor sessions within the inactivity window.",
 );
 
 const jobViews = counter(
@@ -165,25 +240,49 @@ const fontCacheMisses = counter(
   "Font woff2 requests that required a network fetch.",
 );
 
+// Active session tracking state
+const activeSessionMap = new Map<string, number>();
+
 // ── recording API ───────────────────────────────────────────────────────────
 
 /** Keeps label values low-cardinality and safe to render in the exposition format. */
 export function sanitizeLabel(value: unknown, fallback = "unknown"): string {
   if (typeof value !== "string") return fallback;
-  const cleaned = value.replace(/[^a-zA-Z0-9_\-./:]/g, "").slice(0, 64);
+  const cleaned = value.replace(/[^a-zA-Z0-9_\-./:[\]]/g, "").slice(0, 64);
   return cleaned.length > 0 ? cleaned : fallback;
 }
 
-export function recordWebVital(metric: WebVitalName, valueMs: number, path: string) {
-  observe(webVital, { metric, path: sanitizeLabel(path, "/") }, valueMs);
+/**
+ * Normalizes dynamic URL paths to static route templates to prevent label cardinality explosion.
+ * E.g. /job/123 -> /job/[id], /profile/GB... -> /profile/[id].
+ */
+export function normalizePath(path: unknown, fallback = "/"): string {
+  if (typeof path !== "string" || !path.trim()) return fallback;
+  let p = path.split("?")[0].split("#")[0].trim();
+  if (!p.startsWith("/")) p = /;
+
+  // Canonicalize dynamic segments
+  p = p.replace(/\/job\/[^/]+/g, "/job/[id]");
+  p = p.replace(/\/profile\/[^/]+/g, "/profile/[id]");
+
+  return sanitizeLabel(p, fallback);
+}
+
+export function recordWebVital(
+  metric: WebVitalName,
+  valueMs: number,
+  path: string,
+) {
+  observe(webVital, { metric, path: normalizePath(path) }, valueMs);
+}
 }
 
 export function recordLayoutShift(score: number, path: string) {
-  observe(layoutShift, { path: sanitizeLabel(path, "/") }, score);
+  observe(layoutShift, { path: normalizePath(path) }, score);
 }
 
 export function recordPageView(path: string) {
-  incCounter(pageViews, { path: sanitizeLabel(path, "/") });
+  incCounter(pageViews, { path: normalizePath(path) });
 }
 
 export function recordContractTx(
@@ -203,15 +302,34 @@ export function recordContractTx(
 }
 
 export function recordRpcError(kind: string, network: string) {
-  incCounter(rpcErrors, { kind: sanitizeLabel(kind), network: sanitizeLabel(network) });
+  incCounter(rpcErrors, {
+    kind: sanitizeLabel(kind),
+    network: sanitizeLabel(network),
+  });
 }
 
 export function recordClientError(kind: string, path: string) {
-  incCounter(clientErrors, { kind: sanitizeLabel(kind), path: sanitizeLabel(path, "/") });
+  incCounter(clientErrors, { kind: sanitizeLabel(kind), path: normalizePath(path) });
 }
 
-export function recordHttpRequest(route: string, statusCode: number, durationMs: number) {
-  const routeLabel = sanitizeLabel(route, "/");
+export function recordCspViolation(
+  directive: string,
+  blockedUri: string,
+  documentUri?: string,
+) {
+  incCounter(cspViolations, {
+    directive: sanitizeLabel(directive, "unknown"),
+    blocked_uri: sanitizeLabel(blockedUri, "unknown"),
+    document_uri: normalizePath(documentUri),
+  });
+}
+
+export function recordHttpRequest(
+  route: string,
+  statusCode: number,
+  durationMs: number,
+) {
+  const routeLabel = normalizePath(route);
   const statusLabel = String(statusCode);
   incCounter(httpRequests, { route: routeLabel, status: statusLabel });
   observe(httpRequestDuration, { route: routeLabel }, durationMs);
@@ -220,8 +338,26 @@ export function recordHttpRequest(route: string, statusCode: number, durationMs:
   }
 }
 
-export function recordActiveSession() {
+export function pruneSessions(now = Date.now()) {
+  for (const [id, lastSeen] of activeSessionMap.entries()) {
+    if (now - lastSeen > SESSION_INACTIVITY_TTL_MS) {
+      activeSessionMap.delete(id);
+    }
+  }
+  setGauge(activeSessionsGauge, {}, activeSessionMap.size);
+}
+
+export function recordActiveSession(sessionId?: string, now = Date.now()) {
+  incCounter(sessionPingsTotal, {});
   incCounter(activeSessions, { type: "beacon" });
+
+  const id =
+    sessionId && typeof sessionId === "string" && sessionId.trim()
+      ? sessionId.trim().slice(0, 64)
+      : "anonymous-session";
+
+  activeSessionMap.set(id, now);
+  pruneSessions(now);
 }
 
 export function recordJobView(jobId: string) {
@@ -236,7 +372,7 @@ export function recordFontTiming(
 ) {
   const labels = {
     font: sanitizeLabel(name),
-    path: sanitizeLabel(path, "/"),
+    path: normalizePath(path),
   };
   observe(fontTiming, labels, durationMs);
   if (cached) {
@@ -249,6 +385,8 @@ export function recordFontTiming(
 /** Test hook — drops every recorded sample. */
 export function resetMetrics() {
   for (const metric of registry.values()) metric.series.clear();
+  activeSessionMap.clear();
+  setGauge(activeSessionsGauge, {}, 0);
 }
 
 // ── exposition ──────────────────────────────────────────────────────────────
@@ -269,7 +407,7 @@ export function renderMetrics(): string {
     lines.push(`# HELP ${name} ${metric.help}`);
     lines.push(`# TYPE ${name} ${metric.kind}`);
 
-    if (metric.kind === "counter") {
+    if (metric.kind === "counter" || metric.kind === "gauge") {
       for (const { labels, value } of metric.series.values()) {
         lines.push(`${name}${renderLabels(labels)} ${value}`);
       }
@@ -282,7 +420,9 @@ export function renderMetrics(): string {
           `${name}_bucket${renderLabels(entry.labels, { le: String(bucket) })} ${entry.counts[index]}`,
         );
       });
-      lines.push(`${name}_bucket${renderLabels(entry.labels, { le: "+Inf" })} ${entry.count}`);
+      lines.push(
+        `${name}_bucket${renderLabels(entry.labels, { le: "+Inf" })} ${entry.count}`,
+      );
       lines.push(`${name}_sum${renderLabels(entry.labels)} ${entry.sum}`);
       lines.push(`${name}_count${renderLabels(entry.labels)} ${entry.count}`);
     }

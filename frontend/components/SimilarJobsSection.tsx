@@ -53,8 +53,10 @@ export default function SimilarJobsSection({
       .then(({ jobs }) => {
         if (cancelled) return;
         setResults(jobs);
-        setDismissedIds((prev) => {
-          const next = new Set(prev);
+        // Start from an empty set so IDs dismissed for a previous sourceJobId
+        // do not bleed into the new job's visible list (#1337).
+        setDismissedIds(() => {
+          const next = new Set<string>();
           for (const item of jobs) {
             if (isMarkedNotInterested(jobId, String(item.id))) next.add(String(item.id));
           }

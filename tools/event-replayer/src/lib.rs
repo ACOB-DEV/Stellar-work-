@@ -156,6 +156,13 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
 
     // Balances maintained independently per payment token asset (BUG-85)
     let mut accounts_by_token: HashMap<String, TokenAccount> = HashMap::new();
+    // Balance accounts:
+    // contract_balance: actual token cash held in the contract.
+    // escrow_liabilities: funds locked in pending/active jobs.
+    // platform_fees: retained platform fees awaiting withdrawal.
+    let mut contract_balance: i128 = 0;
+    let mut escrow_liabilities: i128 = 0;
+    let mut platform_fees: i128 = 0;
 
     // Stable event identity tracking for deduplication & conflict detection.
     let mut seen_events: HashMap<String, (String, serde_json::Value)> = HashMap::new();
@@ -176,6 +183,8 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                 );
             }
             // Skip repeated identical event from overlapping fetch windows
+            // Exact duplicate event (e.g. from overlapping RPC windows or concatenated logs):
+            // Skip repeated accounting to prevent duplicate ledger replay.
             continue;
         }
         seen_events.insert(key, (event.event_type.clone(), event.data.clone()));
@@ -199,6 +208,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                     .context("Arithmetic overflow in contract_balance during job posting")?;
                 account.escrow_liabilities = account
                     .escrow_liabilities
+                contract_balance = contract_balance
+                    .checked_add(amount)
+                    .context("Arithmetic overflow in contract_balance during job posting")?;
+                escrow_liabilities = escrow_liabilities
                     .checked_add(amount)
                     .context("Arithmetic overflow in escrow_liabilities during job posting")?;
             }
@@ -214,6 +227,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                         "Insufficient escrow liabilities ({}) for token '{}' approval payout + fee ({}) at index {}",
                         account.escrow_liabilities,
                         token,
+                if escrow_liabilities < total {
+                    bail!(
+                        "Insufficient escrow liabilities ({}) for approval payout + fee ({}) at index {}",
+                        escrow_liabilities,
                         total,
                         index
                     );
@@ -223,6 +240,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                         "Insufficient contract cash ({}) for token '{}' payout ({}) at index {}",
                         account.contract_balance,
                         token,
+                if contract_balance < payout {
+                    bail!(
+                        "Insufficient contract cash ({}) for payout ({}) at index {}",
+                        contract_balance,
                         payout,
                         index
                     );
@@ -239,6 +260,14 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                     .context("Underflow in contract_balance")?;
                 account.platform_fees = account
                     .platform_fees
+                escrow_liabilities = escrow_liabilities
+                    .checked_sub(total)
+                    .context("Underflow in escrow_liabilities")?;
+                // Cash movement: actual token payout leaves contract; fee remains retained until withdrawn.
+                contract_balance = contract_balance
+                    .checked_sub(payout)
+                    .context("Underflow in contract_balance")?;
+                platform_fees = platform_fees
                     .checked_add(fee)
                     .context("Overflow in platform_fees")?;
             }
@@ -249,6 +278,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                         "Insufficient platform fees ({}) for token '{}' to withdraw ({}) at index {}",
                         account.platform_fees,
                         token,
+                if platform_fees < withdrawn {
+                    bail!(
+                        "Insufficient platform fees ({}) to withdraw ({}) at index {}",
+                        platform_fees,
                         withdrawn,
                         index
                     );
@@ -258,6 +291,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                         "Insufficient contract cash ({}) for token '{}' to withdraw fees ({}) at index {}",
                         account.contract_balance,
                         token,
+                if contract_balance < withdrawn {
+                    bail!(
+                        "Insufficient contract cash ({}) to withdraw fees ({}) at index {}",
+                        contract_balance,
                         withdrawn,
                         index
                     );
@@ -269,6 +306,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                     .context("Underflow in platform_fees")?;
                 account.contract_balance = account
                     .contract_balance
+                platform_fees = platform_fees
+                    .checked_sub(withdrawn)
+                    .context("Underflow in platform_fees")?;
+                contract_balance = contract_balance
                     .checked_sub(withdrawn)
                     .context("Underflow in contract_balance")?;
             }
@@ -279,6 +320,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                         "Insufficient escrow liabilities ({}) for token '{}' refund ({}) at index {}",
                         account.escrow_liabilities,
                         token,
+                if escrow_liabilities < refund {
+                    bail!(
+                        "Insufficient escrow liabilities ({}) for refund ({}) at index {}",
+                        escrow_liabilities,
                         refund,
                         index
                     );
@@ -288,6 +333,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                         "Insufficient contract cash ({}) for token '{}' refund ({}) at index {}",
                         account.contract_balance,
                         token,
+                if contract_balance < refund {
+                    bail!(
+                        "Insufficient contract cash ({}) for refund ({}) at index {}",
+                        contract_balance,
                         refund,
                         index
                     );
@@ -299,6 +348,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                     .context("Underflow in escrow_liabilities")?;
                 account.contract_balance = account
                     .contract_balance
+                escrow_liabilities = escrow_liabilities
+                    .checked_sub(refund)
+                    .context("Underflow in escrow_liabilities")?;
+                contract_balance = contract_balance
                     .checked_sub(refund)
                     .context("Underflow in contract_balance")?;
             }
@@ -315,6 +368,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                         "Insufficient escrow liabilities ({}) for token '{}' dispute resolution ({}) at index {}",
                         account.escrow_liabilities,
                         token,
+                if escrow_liabilities < total {
+                    bail!(
+                        "Insufficient escrow liabilities ({}) for dispute resolution ({}) at index {}",
+                        escrow_liabilities,
                         total,
                         index
                     );
@@ -324,6 +381,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                         "Insufficient contract cash ({}) for token '{}' dispute resolution ({}) at index {}",
                         account.contract_balance,
                         token,
+                if contract_balance < total {
+                    bail!(
+                        "Insufficient contract cash ({}) for dispute resolution ({}) at index {}",
+                        contract_balance,
                         total,
                         index
                     );
@@ -335,6 +396,10 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                     .context("Underflow in escrow_liabilities")?;
                 account.contract_balance = account
                     .contract_balance
+                escrow_liabilities = escrow_liabilities
+                    .checked_sub(total)
+                    .context("Underflow in escrow_liabilities")?;
+                contract_balance = contract_balance
                     .checked_sub(total)
                     .context("Underflow in contract_balance")?;
             }
@@ -382,6 +447,27 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
                 account.contract_balance,
                 account.escrow_liabilities,
                 account.platform_fees
+        // Invariant assertion: actual contract token cash must always equal escrow liabilities plus retained fees.
+        let total_accounted = escrow_liabilities
+            .checked_add(platform_fees)
+            .context("Overflow checking balance conservation")?;
+        if contract_balance != total_accounted {
+            bail!(
+                "Conservation invariant violated at event index {}: contract_balance ({}) != escrow ({}) + fees ({})",
+                index,
+                contract_balance,
+                escrow_liabilities,
+                platform_fees
+            );
+        }
+
+        if contract_balance < 0 || escrow_liabilities < 0 || platform_fees < 0 {
+            bail!(
+                "Negative balance detected at event index {}: contract={}, escrow={}, fees={}",
+                index,
+                contract_balance,
+                escrow_liabilities,
+                platform_fees
             );
         }
     }
@@ -399,6 +485,9 @@ pub fn replay_events(dataset: &ReplayDataset) -> Result<ReplayReport> {
             final_balances.insert("platform_fees".to_string(), acct.platform_fees.to_string());
         }
     }
+    final_balances.insert("contract_balance".to_string(), contract_balance.to_string());
+    final_balances.insert("escrow_liabilities".to_string(), escrow_liabilities.to_string());
+    final_balances.insert("platform_fees".to_string(), platform_fees.to_string());
 
     let report = ReplayReport {
         dataset: dataset.clone(),
@@ -458,4 +547,258 @@ mod tests {
         assert_eq!(report.final_balances.get("XLM:contract_balance").map(|s| s.as_str()), Some("10000000"));
         assert_eq!(report.final_balances.get("USDC:contract_balance").map(|s| s.as_str()), Some("500000"));
     }
+use chrono::Utc;
+use super::*;
+use std::path::PathBuf;
+
+fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+}
+
+#[test]
+fn test_offline_replay_valid_job_lifecycle() {
+    let fixture_path = fixtures_dir().join("valid-job-lifecycle.json");
+    let dataset = load_dataset_from_file(&fixture_path).expect("Fixture should load");
+
+    assert_eq!(dataset.events.len(), 4);
+    assert_eq!(dataset.events[0].event_type, "job_created");
+    assert_eq!(dataset.events[1].event_type, "job_accepted");
+    assert_eq!(dataset.events[2].event_type, "job_submitted");
+    assert_eq!(dataset.events[3].event_type, "job_approved");
+
+    let report = replay_events(&dataset).expect("Replay should succeed");
+    assert_eq!(report.events_processed, 4);
+    assert_eq!(report.state_transitions.len(), 4);
+
+    // Initial deposit: 2,500,000,000
+    // Approved payout: 2,425,000,000 (leaves contract), fee: 75,000,000 (retained in contract)
+    // Resulting contract cash balance: 75,000,000, retained platform fees: 75,000,000, escrow liabilities: 0
+    assert_eq!(
+        report.final_balances.get("contract_balance").map(|s| s.as_str()),
+        Some("75000000")
+    );
+    assert_eq!(
+        report.final_balances.get("platform_fees").map(|s| s.as_str()),
+        Some("75000000")
+    );
+    assert_eq!(
+        report.final_balances.get("escrow_liabilities").map(|s| s.as_str()),
+        Some("0")
+    );
+}
+
+#[test]
+fn test_offline_replay_fee_withdrawal_conserves_cash() {
+    let fixture_path = fixtures_dir().join("valid-job-lifecycle.json");
+    let mut dataset = load_dataset_from_file(&fixture_path).expect("Fixture should load");
+
+    dataset.events.push(ReplayEvent {
+        id: Some("tx-fee-withdrawal-1".to_string()),
+        ledger: Some(105),
+        tx_hash: Some("0xabc123".to_string()),
+        event_index: Some(1),
+        timestamp: Utc::now(),
+        event_type: "fees_withdrawn".to_string(),
+        contract_id: dataset.contract_id.clone(),
+        topic: vec!["fees_withdrawn".to_string()],
+        data: serde_json::json!({ "amount": 75000000 }),
+    });
+
+    let report = replay_events(&dataset).expect("Replay with fee withdrawal should succeed");
+    assert_eq!(report.events_processed, 5);
+
+    // After withdrawing retained fees, contract cash and platform fees are both 0.
+    assert_eq!(
+        report.final_balances.get("contract_balance").map(|s| s.as_str()),
+        Some("0")
+    );
+    assert_eq!(
+        report.final_balances.get("platform_fees").map(|s| s.as_str()),
+        Some("0")
+    );
+    assert_eq!(
+        report.final_balances.get("escrow_liabilities").map(|s| s.as_str()),
+        Some("0")
+    );
+}
+
+#[test]
+fn test_offline_replay_dispute_resolution() {
+    let fixture_path = fixtures_dir().join("disputed-job.json");
+    let dataset = load_dataset_from_file(&fixture_path).expect("Fixture should load");
+
+    assert_eq!(dataset.events.len(), 4);
+    let report = replay_events(&dataset).expect("Replay should succeed");
+    assert_eq!(report.events_processed, 4);
+
+    // Initial deposit: 1,000,000,000
+    // Split resolution: client 500,000,000 + freelancer 500,000,000 = 1,000,000,000 returned
+    // Final contract balance: 0
+    assert_eq!(
+        report.final_balances.get("contract_balance").map(|s| s.as_str()),
+        Some("0")
+    );
+    assert_eq!(
+        report.final_balances.get("escrow_liabilities").map(|s| s.as_str()),
+        Some("0")
+    );
+}
+
+#[test]
+fn test_offline_replay_malformed_event_fails_loudly() {
+    let fixture_path = fixtures_dir().join("malformed-event.json");
+    let dataset = load_dataset_from_file(&fixture_path).expect("Fixture should load");
+
+    let result = replay_events(&dataset);
+    assert!(result.is_err(), "Unknown event type must fail loudly instead of being skipped");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Unknown or malformed event type"),
+        "Error message should mention unknown or malformed event type, got: {}",
+        err_msg
+    );
+    assert!(err_msg.contains("completely_unknown_event_type"));
+}
+
+#[test]
+fn test_deduplication_of_repeated_ledger_events() {
+    let fixture_path = fixtures_dir().join("valid-job-lifecycle.json");
+    let mut dataset = load_dataset_from_file(&fixture_path).expect("Fixture should load");
+
+    // Duplicate the initial job_created event
+    let duplicated_event = dataset.events[0].clone();
+    dataset.events.insert(1, duplicated_event);
+
+    assert_eq!(dataset.events.len(), 5);
+    let report = replay_events(&dataset).expect("Duplicate identical event should be deduplicated");
+    // Only 4 distinct events should have been processed
+    assert_eq!(report.events_processed, 4);
+    assert_eq!(
+        report.final_balances.get("contract_balance").map(|s| s.as_str()),
+        Some("75000000")
+    );
+}
+
+#[test]
+fn test_duplicate_event_with_conflicting_payload_fails() {
+    let fixture_path = fixtures_dir().join("valid-job-lifecycle.json");
+    let mut dataset = load_dataset_from_file(&fixture_path).expect("Fixture should load");
+
+    // Add an event with same identity ID but different payload
+    let mut conflict_event = dataset.events[0].clone();
+    conflict_event.id = Some("event-id-1".to_string());
+    dataset.events[0].id = Some("event-id-1".to_string());
+    conflict_event.data = serde_json::json!({ "amount": 999999 });
+    dataset.events.insert(1, conflict_event);
+
+    let result = replay_events(&dataset);
+    assert!(result.is_err(), "Conflicting duplicate payload must fail");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("conflicting payload"));
+}
+
+#[test]
+fn test_missing_amount_field_fails() {
+    let dataset = ReplayDataset {
+        contract_id: "test".to_string(),
+        network: "testnet".to_string(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
+        events: vec![ReplayEvent {
+            id: None,
+            ledger: None,
+            tx_hash: None,
+            event_index: None,
+            timestamp: Utc::now(),
+            event_type: "job_posted".to_string(),
+            contract_id: "test".to_string(),
+            topic: vec!["job_posted".to_string()],
+            data: serde_json::json!({}), // Missing "amount"
+        }],
+    };
+
+    let result = replay_events(&dataset);
+    assert!(result.is_err(), "Missing amount field must fail without using invented defaults");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("Missing required financial field 'amount'"));
+}
+
+#[test]
+fn test_i128_decimal_string_support() {
+    let large_i128 = "170141183460469231731687303715884105727"; // 2^127 - 1
+    let dataset = ReplayDataset {
+        contract_id: "test".to_string(),
+        network: "testnet".to_string(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
+        events: vec![ReplayEvent {
+            id: None,
+            ledger: None,
+            tx_hash: None,
+            event_index: None,
+            timestamp: Utc::now(),
+            event_type: "job_posted".to_string(),
+            contract_id: "test".to_string(),
+            topic: vec!["job_posted".to_string()],
+            data: serde_json::json!({ "amount": large_i128 }),
+        }],
+    };
+
+    let report = replay_events(&dataset).expect("Full i128 decimal string amount should parse correctly");
+    assert_eq!(
+        report.final_balances.get("contract_balance").map(|s| s.as_str()),
+        Some(large_i128)
+    );
+}
+
+#[test]
+fn test_negative_amount_fails() {
+    let dataset = ReplayDataset {
+        contract_id: "test".to_string(),
+        network: "testnet".to_string(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
+        events: vec![ReplayEvent {
+            id: None,
+            ledger: None,
+            tx_hash: None,
+            event_index: None,
+            timestamp: Utc::now(),
+            event_type: "job_posted".to_string(),
+            contract_id: "test".to_string(),
+            topic: vec!["job_posted".to_string()],
+            data: serde_json::json!({ "amount": -500 }),
+        }],
+    };
+
+    let result = replay_events(&dataset);
+    assert!(result.is_err(), "Negative amount must fail");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("cannot be negative"));
+}
+
+#[test]
+fn test_excess_fee_withdrawal_fails_negative_balance() {
+    let fixture_path = fixtures_dir().join("valid-job-lifecycle.json");
+    let mut dataset = load_dataset_from_file(&fixture_path).expect("Fixture should load");
+
+    // Try to withdraw more fees than retained (retained is 75,000,000)
+    dataset.events.push(ReplayEvent {
+        id: Some("tx-overdraw".to_string()),
+        ledger: Some(105),
+        tx_hash: Some("0xoverdraw".to_string()),
+        event_index: Some(1),
+        timestamp: Utc::now(),
+        event_type: "fees_withdrawn".to_string(),
+        contract_id: dataset.contract_id.clone(),
+        topic: vec!["fees_withdrawn".to_string()],
+        data: serde_json::json!({ "amount": 80000000 }),
+    });
+
+    let result = replay_events(&dataset);
+    assert!(result.is_err(), "Withdrawing excess fees must fail");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("Insufficient platform fees"));
+}
+
 }
